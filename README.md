@@ -65,7 +65,19 @@ docker compose up -d --build
 
 ---
 
-## 📂 项目结构
+## � 持续集成与 Docker Hub
+
+项目已内置 GitHub Actions 自动化工作流。您可以轻松地将镜像发布到 Docker Hub：
+
+1. **获取 Token**：在 [Docker Hub](https://hub.docker.com/) 的 `Account Settings -> Security` 中创建一个 `Access Token`。
+2. **配置 Secrets**：在 GitHub 仓库的 `Settings -> Secrets and variables -> Actions` 中添加：
+   - `DOCKERHUB_USERNAME`: 您的 Docker Hub 用户名。
+   - `DOCKERHUB_TOKEN`: 刚才生成的 Access Token。
+3. **触发构建**：每当您向 `main` 分支提交代码或推送形如 `v*` 的 Tag 时，GitHub 会自动构建并推送镜像到 `您的用户名/p115-share`。
+
+---
+
+## �📂 项目结构
 
 ```text
 ├── backend/            # FastAPI 后端服务
