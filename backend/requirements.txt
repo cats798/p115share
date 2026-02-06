@@ -1,0 +1,11 @@
+fastapi
+uvicorn[standard]
+websockets
+aiogram
+pydantic-settings
+loguru
+python-multipart
+# p115client will be installed from local path or pypi
+p115client
+aiohttp
+apscheduler==3.10.4

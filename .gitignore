@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+venv/
+ENV/
+.env
+
+# Node
+frontend/node_modules/
+frontend/dist/
+.eslintcache
+
+# Project Specific
+config.json
+*.log
+.DS_Store
+Thumbs.db
+
+# Docker
+.docker/
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo

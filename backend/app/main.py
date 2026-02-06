@@ -1,0 +1,153 @@
+import asyncio
+import logging
+import os
+import sys
+from collections import deque
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.responses import HTMLResponse, FileResponse
+from fastapi.staticfiles import StaticFiles
+from loguru import logger
+
+from app.core.config import settings
+from app.api.config import router as config_router
+from app.services.tg_bot import tg_service
+from app.services.p115 import p115_service
+
+VERSION = "1.0.4"
+
+# Setup Loguru to capture standard logging
+class InterceptHandler(logging.Handler):
+    def emit(self, record):
+        try:
+            level = logger.level(record.levelname).name
+        except ValueError:
+            level = record.levelno
+        frame, depth = logging.currentframe(), 2
+        while frame.f_code.co_filename == logging.__file__:
+            frame = frame.f_back
+            depth += 1
+        logger.opt(depth=depth, exception=record.exc_info).log(level, record.getMessage())
+
+logging.basicConfig(handlers=[InterceptHandler()], level=0, force=True)
+
+# WebSocket Log Broadcaster
+class LogBroadcast:
+    def __init__(self, max_history=100):
+        self.active_connections: list[WebSocket] = []
+        self.history = deque(maxlen=max_history)
+        self.loop = None
+
+    async def connect(self, websocket: WebSocket):
+        await websocket.accept()
+        # Send history first
+        for msg in self.history:
+            try:
+                await websocket.send_text(msg)
+            except Exception:
+                pass
+        self.active_connections.append(websocket)
+        if not self.loop:
+            self.loop = asyncio.get_running_loop()
+
+    def disconnect(self, websocket: WebSocket):
+        if websocket in self.active_connections:
+            self.active_connections.remove(websocket)
+
+    def broadcast(self, message: str):
+        self.history.append(message)
+        if not self.loop or not self.active_connections:
+            return
+        
+        # Ensure we schedule the send task in the right loop
+        for connection in list(self.active_connections):
+            asyncio.run_coroutine_threadsafe(self._send_safe(connection, message), self.loop)
+
+    async def _send_safe(self, websocket: WebSocket, message: str):
+        try:
+            await websocket.send_text(message)
+        except Exception:
+            self.disconnect(websocket)
+
+log_broadcast = LogBroadcast()
+
+# Intercept Loguru logs to send to WebSocket
+def websocket_sink(message):
+    log_broadcast.broadcast(str(message))
+
+logger.add(websocket_sink, format="{time} | {level} | {message}")
+logger.add(sys.stdout, format="<green>{time}</green> | <level>{level}</level> | {message}")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup
+    logger.info(f"P115-Share API {VERSION} starting up...")
+    # Start telegram bot
+    if tg_service.bot:
+        asyncio.create_task(tg_service.start_polling())
+    # Start cleanup scheduler  
+    from app.services.scheduler import cleanup_scheduler
+    cleanup_scheduler.start()
+    
+    yield
+    
+    # Shutdown
+    cleanup_scheduler.shutdown()
+    logger.info("P115-Share API shutting down...")
+
+app = FastAPI(title="P115-Share API", lifespan=lifespan)
+
+# Mount static files (built from frontend)
+try:
+    app.mount("/static", StaticFiles(directory="static"), name="static")
+except Exception:
+    pass
+
+app.include_router(config_router)
+
+@app.get("/{full_path:path}")
+async def serve_frontend(full_path: str):
+    # Static files mount handles "/static", but we also want to handle root and deep links
+    if full_path.startswith("api") or full_path.startswith("ws"):
+        return {"detail": "Not Found"}
+    
+    # Path to static folder
+    static_dir = "static"
+    
+    # Try to find the actual file
+    file_path = os.path.join(static_dir, full_path)
+    if os.path.isfile(file_path):
+        return FileResponse(file_path)
+    
+    # Default to index.html for SPA support if file not found
+    index_path = os.path.join(static_dir, "index.html")
+    if os.path.isfile(index_path):
+        return FileResponse(index_path)
+    
+    return {"detail": "Frontend not found"}
+
+@app.websocket("/ws/logs")
+async def websocket_endpoint(websocket: WebSocket):
+    await log_broadcast.connect(websocket)
+    try:
+        while True:
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        log_broadcast.disconnect(websocket)
+
+@app.get("/")
+async def root():
+    return {"status": "ok", "version": VERSION, "message": "P115-Share API is running"}
+
+@app.get("/config")
+async def get_config_summary():
+    return {
+        "tg_bot_token": settings.TG_BOT_TOKEN is not None,
+        "tg_channel_id": settings.TG_CHANNEL_ID,
+        "p115_cookie": settings.P115_COOKIE is not None
+    }
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=settings.WEB_PORT)

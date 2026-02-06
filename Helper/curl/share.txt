@@ -1,0 +1,77 @@
+curl 'https://webapi.115.com/share/send' \
+  -H 'Accept: application/json, text/javascript, */*; q=0.01' \
+  -H 'Accept-Language: zh-CN,zh;q=0.9' \
+  -H 'Connection: keep-alive' \
+  -H 'Content-Type: application/x-www-form-urlencoded; charset=UTF-8' \
+  -H 'Cookie: USERSESSIONID=5c368af8b8874b3069c8951ff69e9f1cc1bf64a94c3c35a6cb417bd11fb260c5; 115_lang=zh; GST=be6e362deac16cef20857eb606bbffaf; UID=100250215_A1_1770389718; CID=339dc77b57b0f349b7ef90254e4db399; SEID=14f9b047606b19a62b606df58c30d43483162001d7f4c00b04f576fe35f79e3780421a8b2056d345d289eb106ead97866c3888d29a6efc75b43c68a2; KID=b05c8a93b24bd0e8b1d2ab7f4e804d97; acw_tc=784e2c8517703897192787873e8db548a55a5a5f54fd1acaf95d05e9f10a0e; PHPSESSID=o43a03lm5hr6m0sb7o92f71etg' \
+  -H 'Origin: https://115.com' \
+  -H 'Referer: https://115.com/' \
+  -H 'Sec-Fetch-Dest: empty' \
+  -H 'Sec-Fetch-Mode: cors' \
+  -H 'Sec-Fetch-Site: same-site' \
+  -H 'User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36 115Browser/36.0.0 Chromium/125.0' \
+  -H 'sec-ch-ua: "Chromium";v="125", "Not.A/Brand";v="24"' \
+  -H 'sec-ch-ua-mobile: ?0' \
+  -H 'sec-ch-ua-platform: "Windows"' \
+  --data-raw 'user_id=100250215&file_ids=3355997154323803767&ignore_warn=1&is_asc=1&order=file_name'
+
+  {
+  "state": true,
+  "error": "",
+  "errno": 0,
+  "data": {
+    "total_size": 158517584,
+    "share_title": "半斤八两.2017.S01E01.mp4",
+    "file_count": 1,
+    "folder_count": 0,
+    "file_category": 1,
+    "receive_code": "ga30",
+    "bind_receive_code": 1,
+    "share_duration_options": {
+      "1": "1天",
+      "3": "3天",
+      "5": "5天",
+      "7": "7天",
+      "15": "15天",
+      "-1": "长期"
+    },
+    "share_ex_duration": "15天",
+    "share_ex_time": 1771686077,
+    "skip_login_state": 0,
+    "share_code": "swf43ef3ze1",
+    "share_url": "https://115cdn.com/s/swf43ef3ze1",
+    "share_command": "/swf43ef3ze1-ga30/",
+    "define_receive_code": 1
+  }
+}
+
+
+
+curl 'https://webapi.115.com/share/updateshare' \
+  -H 'Accept: application/json, text/javascript, */*; q=0.01' \
+  -H 'Accept-Language: zh-CN,zh;q=0.9' \
+  -H 'Connection: keep-alive' \
+  -H 'Content-Type: application/x-www-form-urlencoded; charset=UTF-8' \
+  -H 'Cookie: USERSESSIONID=5c368af8b8874b3069c8951ff69e9f1cc1bf64a94c3c35a6cb417bd11fb260c5; 115_lang=zh; GST=be6e362deac16cef20857eb606bbffaf; UID=100250215_A1_1770389718; CID=339dc77b57b0f349b7ef90254e4db399; SEID=14f9b047606b19a62b606df58c30d43483162001d7f4c00b04f576fe35f79e3780421a8b2056d345d289eb106ead97866c3888d29a6efc75b43c68a2; KID=b05c8a93b24bd0e8b1d2ab7f4e804d97; acw_tc=784e2c8517703897192787873e8db548a55a5a5f54fd1acaf95d05e9f10a0e; PHPSESSID=o43a03lm5hr6m0sb7o92f71etg' \
+  -H 'Origin: https://cdnres.115.com' \
+  -H 'Referer: https://cdnres.115.com/' \
+  -H 'Sec-Fetch-Dest: empty' \
+  -H 'Sec-Fetch-Mode: cors' \
+  -H 'Sec-Fetch-Site: same-site' \
+  -H 'User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36 115Browser/36.0.0 Chromium/125.0' \
+  -H 'sec-ch-ua: "Chromium";v="125", "Not.A/Brand";v="24"' \
+  -H 'sec-ch-ua-mobile: ?0' \
+  -H 'sec-ch-ua-platform: "Windows"' \
+  --data-raw 'share_code=swf43ef3ze1&share_duration=-1'
+
+
+  {
+  "state": true,
+  "error": "",
+  "errno": 0,
+  "data": {
+    "swf43ef3ze1": {
+      "share_ex_time": -1
+    }
+  }
+}
