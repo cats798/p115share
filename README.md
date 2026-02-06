@@ -30,20 +30,54 @@
 
 ## 🛠 快速开始 (Docker 部署)
 
-推荐使用 Docker Compose 进行一键部署，系统已实现前后端深度集成。
+### 方式一：使用 Docker 直接运行 (推荐)
 
-### 1. 克隆项目
+直接从 Docker Hub 拉取镜像运行：
+
+```bash
+docker run -d \
+  --name p115-share \
+  -p 8000:8000 \
+  -v $(pwd)/config.json:/app/config.json \
+  --restart unless-stopped \
+  listeningltg/p115-share:latest
+```
+
+### 方式二：使用 Docker Compose
+
+创建 `docker-compose.yml` 文件：
+
+```yaml
+version: '3.8'
+
+services:
+  p115-share:
+    image: listeningltg/p115-share:latest
+    container_name: p115-share
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./config.json:/app/config.json
+    restart: unless-stopped
+```
+
+然后启动服务：
+
+```bash
+docker compose up -d
+```
+
+### 方式三：本地构建
+
+如果您想从源码构建：
+
 ```bash
 git clone https://github.com/ListeningLTG/P115-Share.git
 cd P115-Share
-```
-
-### 2. 构建并启动
-```bash
 docker compose up -d --build
 ```
 
-### 3. 初始化配置
+### 初始化配置
 - 访问管理界面：`http://localhost:8000`
 - 进入 **[系统配置]** 页面，填写以下核心信息：
   - **115 Cookie**：您的 115 账号登录凭证。
