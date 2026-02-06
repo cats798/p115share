@@ -7,7 +7,7 @@ COPY frontend/ ./
 RUN npm run build
 
 # Production Stage
-FROM python:3.11-slim
+FROM python:3.12-slim
 WORKDIR /app
 
 # Copy and install p115client first (local dependency)
