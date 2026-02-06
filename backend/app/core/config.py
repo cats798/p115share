@@ -4,7 +4,8 @@ from pydantic_settings import BaseSettings
 from typing import Optional
 from loguru import logger
 
-CONFIG_FILE = "config.json"
+CONFIG_DIR = "/app/config"
+CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
 
 class Settings(BaseSettings):
     # Telegram
@@ -30,6 +31,7 @@ class Settings(BaseSettings):
         env_file = ".env"
 
     def save_to_file(self):
+        os.makedirs(CONFIG_DIR, exist_ok=True)
         data = self.model_dump(exclude_unset=False)
         with open(CONFIG_FILE, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=4, ensure_ascii=False)

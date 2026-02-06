@@ -10,6 +10,9 @@ RUN npm run build
 FROM python:3.12-slim
 WORKDIR /app
 
+# Create config directory
+RUN mkdir -p /app/config
+
 # Copy and install p115client first (local dependency)
 COPY Helper /app/Helper
 RUN pip install --no-cache-dir /app/Helper/p115client-main

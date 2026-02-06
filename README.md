@@ -38,10 +38,12 @@
 docker run -d \
   --name p115-share \
   -p 8000:8000 \
-  -v $(pwd)/config.json:/app/config.json \
+  -v $(pwd)/config:/app/config \
   --restart unless-stopped \
   listeningltg/p115-share:latest
 ```
+
+> **说明**：首次运行会自动在 `./config` 目录下生成 `config.json` 配置文件。
 
 ### 方式二：使用 Docker Compose
 
@@ -57,7 +59,7 @@ services:
     ports:
       - "8000:8000"
     volumes:
-      - ./config.json:/app/config.json
+      - ./config:/app/config
     restart: unless-stopped
 ```
 
