@@ -104,12 +104,13 @@ try:
 except Exception:
     pass
 
-app.include_router(config_router)
+# Include API routers BEFORE catch-all route
+app.include_router(config_router, prefix="/api")
 
 @app.get("/{full_path:path}")
 async def serve_frontend(full_path: str):
-    # Static files mount handles "/static", but we also want to handle root and deep links
-    if full_path.startswith("api") or full_path.startswith("ws"):
+    # API and WebSocket routes should be handled by their routers
+    if full_path.startswith("api/") or full_path.startswith("ws/"):
         return {"detail": "Not Found"}
     
     # Path to static folder
