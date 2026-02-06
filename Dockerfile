@@ -1,5 +1,5 @@
 # Build Stage for Frontend
-FROM node:18-alpine as build-stage
+FROM node:18-alpine AS build-stage
 WORKDIR /app/frontend
 COPY frontend/package*.json ./
 RUN npm install
@@ -10,16 +10,16 @@ RUN npm run build
 FROM python:3.11-slim
 WORKDIR /app
 
-# Install dependencies
+# Copy and install p115client first (local dependency)
+COPY Helper /app/Helper
+RUN pip install --no-cache-dir /app/Helper/p115client-main
+
+# Install other dependencies
 COPY backend/requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy backend code
 COPY backend/app ./app
-COPY Helper /app/Helper
-
-# Install p115client from local source
-RUN pip install -e /app/Helper/p115client-main
 
 # Copy frontend build to static folder
 COPY --from=build-stage /app/frontend/dist /app/static
