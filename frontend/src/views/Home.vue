@@ -152,7 +152,7 @@ import {
   PlusOutlined,
   LoadingOutlined
 } from '@ant-design/icons-vue';
-import { Grid, message, Modal } from 'ant-design-vue';
+import { Grid, message } from 'ant-design-vue';
 import Dashboard from './Dashboard.vue';
 import LogViewer from './LogViewer.vue';
 import Settings from './Settings.vue';
@@ -165,7 +165,7 @@ const router = useRouter();
 const useBreakpoint = Grid.useBreakpoint;
 const screens = useBreakpoint();
 
-const isMobile = computed(() => !screens.md && (screens.sm || screens.xs));
+const isMobile = computed(() => !screens.value.md && (screens.value.sm || screens.value.xs));
 const drawerVisible = ref(false);
 const collapsed = ref<boolean>(false);
 const selectedKeys = ref<string[]>(['dashboard']);
@@ -225,7 +225,7 @@ const handleLogout = () => {
 
 // 自动根据屏幕尺寸收缩菜单
 watch(
-  () => screens.lg,
+  () => screens.value.lg,
   (isLg) => {
     if (!isLg && !isMobile.value) {
       collapsed.value = true;

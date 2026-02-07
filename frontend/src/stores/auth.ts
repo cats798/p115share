@@ -1,10 +1,15 @@
 import { defineStore } from 'pinia'
 import axios from 'axios'
 
+interface User {
+  username: string;
+  avatar_url?: string;
+}
+
 export const useAuthStore = defineStore('auth', {
   state: () => ({
     token: localStorage.getItem('token') || '',
-    user: null,
+    user: null as User | null,
     loading: false
   }),
   getters: {
