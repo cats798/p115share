@@ -7,9 +7,8 @@ from sqlalchemy import select, update
 from app.core.database import engine, async_session, Base
 from app.models.schema import User as UserModel, SystemSettings
 
-# Standardize config paths
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
+# Config file path for optional migration
+CONFIG_FILE = "/app/data/config.json"
 
 class Settings(BaseSettings):
     # Telegram
