@@ -9,3 +9,7 @@ python-multipart
 aiohttp
 apscheduler==3.10.4
 aiofiles
+sqlalchemy
+aiosqlite
+python-jose[cryptography]
+passlib[bcrypt]
