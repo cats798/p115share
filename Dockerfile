@@ -13,13 +13,11 @@ WORKDIR /app
 # Create config directory
 RUN mkdir -p /app/config
 
-# Copy and install p115client first (local dependency)
-COPY Helper /app/Helper
-RUN pip install --no-cache-dir /app/Helper/p115client-main
-
-# Install other dependencies
+# Install dependencies
 COPY backend/requirements.txt ./
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt && \
+    pip install --no-cache-dir p115client
+
 
 # Copy backend code
 COPY backend/app ./app
