@@ -87,7 +87,7 @@ async def get_config(user=Depends(get_current_user)):
         "p115_cleanup_dir_cron": settings.P115_CLEANUP_DIR_CRON,
         "p115_cleanup_trash_cron": settings.P115_CLEANUP_TRASH_CRON,
         "p115_recycle_password": settings.P115_RECYCLE_PASSWORD,
-        "version": "1.0.5"
+        "version": "1.0.6"
     }
 
 @router.post("/test-bot")

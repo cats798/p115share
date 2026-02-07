@@ -30,7 +30,7 @@
     <!-- Mobile Drawer -->
     <a-drawer
       v-else
-      v-model:visible="drawerVisible"
+      v-model:open="drawerVisible"
       placement="left"
       :closable="false"
       :body-style="{ padding: 0, height: '100vh', background: '#001529' }"
@@ -57,7 +57,7 @@
     </a-drawer>
 
     <a-layout :style="layoutStyle">
-      <a-layout-header style="background: #fff; padding: 0 16px; display: flex; align-items: center; justify-content: space-between; position: sticky; top: 0; z-index: 99; width: 100%; box-shadow: 0 2px 8px #f0f1f2">
+      <a-layout-header :style="{ background: antdToken.colorBgContainer, padding: '0 16px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', position: 'sticky', top: 0, zIndex: 99, width: '100%', boxShadow: '0 2px 8px ' + antdToken.colorFillSecondary }">
         <div style="display: flex; align-items: center">
           <a-button 
             v-if="isMobile" 
@@ -73,7 +73,15 @@
           </h2>
         </div>
         
-        <!-- User Profile -->
+        <div style="display: flex; align-items: center; gap: 16px">
+          <!-- Theme Toggle -->
+          <a-button type="text" @click="themeStore.toggleTheme" style="font-size: 18px; display: flex; align-items: center; justify-content: center">
+            <template #icon>
+              <BulbOutlined :style="{ color: themeStore.mode === 'dark' ? '#ffcc00' : 'inherit' }" />
+            </template>
+          </a-button>
+
+          <!-- User Profile -->
         <a-dropdown>
           <div class="user-avatar-wrap" @click.prevent>
             <a-avatar :src="auth.user?.avatar_url || '/logo.png'" />
@@ -93,10 +101,11 @@
             </a-menu>
           </template>
         </a-dropdown>
-      </a-layout-header>
+      </div>
+    </a-layout-header>
       
       <a-layout-content :style="{ margin: isMobile ? '8px' : '16px' }">
-        <div :style="{ padding: isMobile ? '16px' : '24px', background: '#fff', minHeight: '360px', borderRadius: '4px' }">
+        <div :style="{ padding: isMobile ? '16px' : '24px', background: antdToken.colorBgContainer, minHeight: '360px', borderRadius: '4px' }">
           <Dashboard v-if="currentView === 'dashboard'" />
           <LogViewer v-if="currentView === 'logs'" />
           <Settings v-if="currentView === 'settings'" />
@@ -108,7 +117,7 @@
     </a-layout>
 
     <!-- Profile Modal -->
-    <a-modal v-model:visible="showProfileModal" title="个人中心" @ok="handleProfileUpdate" :confirmLoading="profileLoading">
+    <a-modal v-model:open="showProfileModal" title="个人中心" @ok="handleProfileUpdate" :confirmLoading="profileLoading">
       <a-form layout="vertical">
         <a-form-item label="用户名">
           <a-input :value="auth.user?.username" disabled />
@@ -150,17 +159,23 @@ import {
   UserOutlined,
   LogoutOutlined,
   PlusOutlined,
-  LoadingOutlined
+  LoadingOutlined,
+  BulbOutlined
 } from '@ant-design/icons-vue';
-import { Grid, message } from 'ant-design-vue';
+import { Grid, message, theme } from 'ant-design-vue';
 import Dashboard from './Dashboard.vue';
 import LogViewer from './LogViewer.vue';
 import Settings from './Settings.vue';
 import { useAuthStore } from '../stores/auth';
+import { useThemeStore } from '../stores/theme';
 import { useRouter } from 'vue-router';
 import axios from 'axios';
 
+const { useToken } = theme;
+const { token: antdToken } = useToken();
+
 const auth = useAuthStore();
+const themeStore = useThemeStore();
 const router = useRouter();
 const useBreakpoint = Grid.useBreakpoint;
 const screens = useBreakpoint();

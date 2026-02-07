@@ -38,12 +38,12 @@
 docker run -d \
   -p 8000:8000 \
   -e TZ=Asia/Shanghai \
-  -v $(pwd)/config:/app/config \
+  -v $(pwd)/data:/app/data \
   --restart unless-stopped \
   listeningltg/p115-share:latest
 ```
 
-> **说明**：首次运行会自动在 `./config` 目录下生成 `config.json` 配置文件。
+> **说明**：首次运行会自动在 `./data` 目录下生成 `p115share.db` 数据库文件。
 
 ### 方式二：使用 Docker Compose
 

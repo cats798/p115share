@@ -10,8 +10,8 @@ RUN npm run build
 FROM python:3.12-slim
 WORKDIR /app
 
-# Create config directory
-RUN mkdir -p /app/config
+# Create data directory for database and config
+RUN mkdir -p /app/data
 
 # Install dependencies
 COPY backend/requirements.txt ./
