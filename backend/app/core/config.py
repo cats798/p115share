@@ -7,9 +7,6 @@ from sqlalchemy import select, update
 from app.core.database import engine, async_session, Base
 from app.models.schema import User as UserModel, SystemSettings
 
-# Config file path for optional migration
-CONFIG_FILE = "/app/data/config.json"
-
 class Settings(BaseSettings):
     # Telegram
     TG_BOT_TOKEN: str = ""
@@ -52,36 +49,18 @@ class Settings(BaseSettings):
             # Check if we need to migrate from config.json
             result = await session.execute(select(SystemSettings).limit(1))
             if not result.scalar_one_or_none():
-                await self._migrate_from_json(session)
+                await self._init_default_settings(session)
             else:
                 await self._load_from_db(session)
             
             await session.commit()
 
-    async def _migrate_from_json(self, session):
-        """One-time migration from config.json to SQLite"""
-        migration_data = {}
-        if os.path.exists(CONFIG_FILE):
-            try:
-                with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-                    migration_data = json.load(f)
-                logger.info(f"💾 Migrating data from {CONFIG_FILE} to database...")
-            except Exception as e:
-                logger.error(f"Failed to read config.json for migration: {e}")
-
-        # Use environment variables or class defaults as fallback
+    async def _init_default_settings(self, session):
+        """Initialize settings with defaults from class attributes"""
+        logger.info("💾 Initializing default settings in database...")
         for field in self.model_fields:
-            val = migration_data.get(field, getattr(self, field))
-            setattr(self, field, val)
-            # Store in DB
+            val = getattr(self, field)
             session.add(SystemSettings(key=field, value=str(val)))
-        
-        if os.path.exists(CONFIG_FILE):
-            try:
-                os.rename(CONFIG_FILE, CONFIG_FILE + ".bak")
-                logger.info(f"✅ Migration complete. {CONFIG_FILE} renamed to .bak")
-            except Exception as e:
-                logger.warning(f"Could not rename config file: {e}")
 
     async def _load_from_db(self, session):
         """Load settings from system_settings table"""
