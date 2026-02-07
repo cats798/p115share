@@ -14,7 +14,9 @@ frontend/dist/
 
 # Project Specific
 config.json
+config.json.bak
 *.log
+*.db
 .DS_Store
 Thumbs.db
 

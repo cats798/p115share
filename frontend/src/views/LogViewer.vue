@@ -70,6 +70,7 @@ onUnmounted(() => {
 <style scoped>
 .log-container {
   height: 60vh;
+  min-height: 300px;
   background: #1e1e1e;
   color: #d4d4d4;
   padding: 10px;
@@ -77,6 +78,13 @@ onUnmounted(() => {
   font-family: 'Courier New', Courier, monospace;
   font-size: 13px;
   border-radius: 4px;
+}
+
+@media (max-width: 576px) {
+  .log-container {
+    height: 50vh;
+    font-size: 11px;
+  }
 }
 .log-line {
   margin-bottom: 2px;

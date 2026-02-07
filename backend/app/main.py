@@ -12,10 +12,11 @@ from loguru import logger
 
 from app.core.config import settings
 from app.api.config import router as config_router
+from app.api.auth import router as auth_router
 from app.services.tg_bot import tg_service
 from app.services.p115 import p115_service
 
-VERSION = "1.0.4"
+VERSION = "1.0.5"
 
 # Setup Loguru to capture standard logging
 class InterceptHandler(logging.Handler):
@@ -76,16 +77,32 @@ log_broadcast = LogBroadcast()
 def websocket_sink(message):
     log_broadcast.broadcast(str(message))
 
-logger.add(websocket_sink, format="{time} | {level} | {message}")
-logger.add(sys.stdout, format="<green>{time}</green> | <level>{level}</level> | {message}")
+logger.add(websocket_sink, format="{time:YYYY-MM-DD HH:mm:ss} | {level} | {message}")
+logger.add(sys.stdout, format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level}</level> | {message}")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup
     logger.info(f"P115-Share API {VERSION} starting up...")
+    
+    # Init DB and migrate settings
+    await settings.init_db()
+    
+    # Re-initialize services with loaded settings
+    from app.services.p115 import p115_service
+    from app.services.tg_bot import tg_service
+    
+    if settings.P115_COOKIE:
+        p115_service.init_client(settings.P115_COOKIE)
+    
     # Start telegram bot
-    if tg_service.bot:
-        asyncio.create_task(tg_service.start_polling())
+    if settings.TG_BOT_TOKEN:
+        if not tg_service.bot:
+            tg_service.init_bot(settings.TG_BOT_TOKEN)
+        tg_service.polling_task = asyncio.create_task(tg_service.start_polling())
+        # Recover pending tasks from DB
+        await tg_service.recover_pending_tasks()
+    
     # Start cleanup scheduler  
     from app.services.scheduler import cleanup_scheduler
     cleanup_scheduler.start()
@@ -96,16 +113,27 @@ async def lifespan(app: FastAPI):
     cleanup_scheduler.shutdown()
     logger.info("P115-Share API shutting down...")
 
-app = FastAPI(title="P115-Share API", lifespan=lifespan)
+app = FastAPI(
+    title="P115-Share API",
+    version=VERSION,
+    lifespan=lifespan
+)
 
-# Mount static files (built from frontend)
-try:
-    app.mount("/static", StaticFiles(directory="static"), name="static")
-except Exception:
-    pass
+from fastapi.middleware.cors import CORSMiddleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # Include API routers BEFORE catch-all route
+app.include_router(auth_router, prefix="/api")
 app.include_router(config_router, prefix="/api")
+
+# Mount static files separately (highest priority for /static)
+app.mount("/static", StaticFiles(directory="static"), name="static")
 
 @app.get("/{full_path:path}")
 async def serve_frontend(full_path: str):
@@ -116,8 +144,12 @@ async def serve_frontend(full_path: str):
     # Path to static folder
     static_dir = "static"
     
-    # Try to find the actual file
-    file_path = os.path.join(static_dir, full_path)
+    # Try to find the actual file (strip 'static/' prefix if present in catch-all)
+    lookup_path = full_path
+    if lookup_path.startswith("static/"):
+        lookup_path = lookup_path[7:]
+        
+    file_path = os.path.join(static_dir, lookup_path)
     if os.path.isfile(file_path):
         return FileResponse(file_path)
     
@@ -140,14 +172,6 @@ async def websocket_endpoint(websocket: WebSocket):
 @app.get("/")
 async def root():
     return {"status": "ok", "version": VERSION, "message": "P115-Share API is running"}
-
-@app.get("/config")
-async def get_config_summary():
-    return {
-        "tg_bot_token": settings.TG_BOT_TOKEN is not None,
-        "tg_channel_id": settings.TG_CHANNEL_ID,
-        "p115_cookie": settings.P115_COOKIE is not None
-    }
 
 if __name__ == "__main__":
     import uvicorn

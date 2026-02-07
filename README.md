@@ -36,8 +36,8 @@
 
 ```bash
 docker run -d \
-  --name p115-share \
   -p 8000:8000 \
+  -e TZ=Asia/Shanghai \
   -v $(pwd)/config:/app/config \
   --restart unless-stopped \
   listeningltg/p115-share:latest
@@ -59,7 +59,9 @@ services:
     ports:
       - "8000:8000"
     volumes:
-      - ./config:/app/config
+      - ./data:/app/data
+    environment:
+      - TZ=Asia/Shanghai
     restart: unless-stopped
 ```
 
@@ -86,6 +88,7 @@ docker compose up -d --build
   - **TG Bot Token**：从 [@BotFather](https://t.me/BotFather) 获取。
   - **TG 用户 ID**：您的 Telegram ID（点击“测试机器人”获取）。
   - **白名单配置**：允许触发机器人的聊天 ID（用英文逗号分隔）。
+  - **TG 频道 ID**：用于广播分享的频道 ID（**注意：Bot 必须被设为该频道的管理员才能发送消息**）。
 - 点击“保存配置”后，系统将持续运行。
 
 ---
