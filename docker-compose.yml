@@ -10,6 +10,7 @@ services:
       - "8000:8000"
     volumes:
       - ./data:/app/data
+      - ./avatars:/app/backend/static/avatars
     environment:
       - TZ=Asia/Shanghai
     restart: unless-stopped

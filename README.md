@@ -39,11 +39,14 @@ docker run -d \
   -p 8000:8000 \
   -e TZ=Asia/Shanghai \
   -v $(pwd)/data:/app/data \
+  -v $(pwd)/avatars:/app/backend/static/avatars \
   --restart unless-stopped \
   listeningltg/p115-share:latest
 ```
 
-> **说明**：首次运行会自动在 `./data` 目录下生成 `p115share.db` 数据库文件。
+> **说明**：
+> - `data` 目录用于持久化数据库文件
+> - `avatars` 目录用于持久化用户上传的头像，确保更新镜像后不丢失
 
 ### 方式二：使用 Docker Compose
 
@@ -60,6 +63,7 @@ services:
       - "8000:8000"
     volumes:
       - ./data:/app/data
+      - ./avatars:/app/backend/static/avatars
     environment:
       - TZ=Asia/Shanghai
     restart: unless-stopped
