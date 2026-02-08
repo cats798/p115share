@@ -13,21 +13,10 @@ frontend/dist/
 .eslintcache
 
 # Project Specific
-config.json
-config.json.bak
 *.log
 *.db
 .DS_Store
 Thumbs.db
-
-# User uploaded avatars
-backend/static/avatars/*
-!backend/static/avatars/.gitkeep
-avatars/*
-!avatars/README.md
-
-# Documentation (optional, for local reference only)
-cleanup-git-history.md
 
 # Docker
 .docker/

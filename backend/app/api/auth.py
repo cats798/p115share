@@ -82,34 +82,28 @@ async def upload_avatar(
     current_user: UserModel = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
-    import uuid
-    import shutil
-    import os
+    import base64
     
     # Validate file type
     if not file.content_type.startswith("image/"):
         raise HTTPException(status_code=400, detail="File must be an image")
     
-    # Ensure directory exists
-    avatar_dir = os.path.join("static", "avatars")
-    os.makedirs(avatar_dir, exist_ok=True)
+    # Validate file size (max 2MB)
+    max_size = 2 * 1024 * 1024
+    file_content = await file.read()
+    if len(file_content) > max_size:
+        raise HTTPException(status_code=400, detail="Avatar file too large (max 2MB)")
     
-    # Generate unique filename
-    ext = os.path.splitext(file.filename)[1]
-    filename = f"{uuid.uuid4()}{ext}"
-    file_path = os.path.join(avatar_dir, filename)
-    
-    # Save file
+    # Convert to base64 data URI
     try:
-        with open(file_path, "wb") as buffer:
-            shutil.copyfileobj(file.file, buffer)
+        base64_str = base64.b64encode(file_content).decode('utf-8')
+        avatar_data_uri = f"data:{file.content_type};base64,{base64_str}"
     except Exception as e:
-        logger.error(f"Failed to save avatar: {e}")
-        raise HTTPException(status_code=500, detail="Could not save file")
+        logger.error(f"Failed to encode avatar: {e}")
+        raise HTTPException(status_code=500, detail="Could not process image")
     
-    # Update user avatar URL
-    avatar_url = f"/static/avatars/{filename}"
-    current_user.avatar_url = avatar_url
+    # Update user avatar (store base64 data URI)
+    current_user.avatar_url = avatar_data_uri
     await db.commit()
     
-    return {"status": "success", "avatar_url": avatar_url}
+    return {"status": "success", "avatar_url": avatar_data_uri}

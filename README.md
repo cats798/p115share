@@ -39,14 +39,11 @@ docker run -d \
   -p 8000:8000 \
   -e TZ=Asia/Shanghai \
   -v $(pwd)/data:/app/data \
-  -v $(pwd)/avatars:/app/backend/static/avatars \
   --restart unless-stopped \
   listeningltg/p115-share:latest
 ```
 
-> **说明**：
-> - `data` 目录用于持久化数据库文件
-> - `avatars` 目录用于持久化用户上传的头像，确保更新镜像后不丢失
+> **说明**：`data` 目录用于持久化数据库文件（包括用户头像 base64 数据）
 
 ### 方式二：使用 Docker Compose
 
@@ -63,7 +60,6 @@ services:
       - "8000:8000"
     volumes:
       - ./data:/app/data
-      - ./avatars:/app/backend/static/avatars
     environment:
       - TZ=Asia/Shanghai
     restart: unless-stopped
@@ -125,11 +121,10 @@ docker compose up -d --build
 
 ```text
 ├── backend/            # FastAPI 后端服务
-├── frontend/           # Vue 3 按钮前端源码
+├── frontend/           # Vue 3 前端源码
 ├── Helper/             # p115client 核心组件
 ├── Dockerfile          # 多阶段构建文件
-├── docker-compose.yml  # 容器编排文件
-└── config.json         # 持久化配置文件 (自动生成)
+└── docker-compose.yml  # 容器编排文件
 ```
 
 ---

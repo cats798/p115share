@@ -9,7 +9,7 @@ class User(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     username: Mapped[str] = mapped_column(String(50), unique=True, index=True)
     hashed_password: Mapped[str] = mapped_column(String(255))
-    avatar_url: Mapped[str] = mapped_column(String(255), default="/logo.png")
+    avatar_url: Mapped[str] = mapped_column(Text, default="/logo.png")  # Stores base64 data URI or path
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 class SystemSettings(Base):
