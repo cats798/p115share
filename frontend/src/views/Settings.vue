@@ -214,13 +214,13 @@ const onFinish = async (section: 'tg' | 'p115' | 'proxy' = 'tg') => {
 
     // Validate only related fields if possible (or just validate all for simplicity, 
     // but only send the relevant ones)
-    await formRef.value.validate(sectionFields[section]);
+    await formRef.value.validate(sectionFields[section]!);
     
     loading.value = true;
     
     // Create a dynamic payload containing ONLY the fields for this section
     const payload: Record<string, any> = {};
-    sectionFields[section].forEach(field => {
+    sectionFields[section]!.forEach(field => {
       payload[field] = (formState as any)[field];
     });
 
