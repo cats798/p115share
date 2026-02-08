@@ -252,13 +252,9 @@ class P115Service:
                         # Verify if files really exist in to_cid
                         found_all = False
                         try:
-                            # Quick check for existence
-                            resp = await self.client.fs_files({"cid": to_cid, "limit": 100}, async_=True)
-                            check_response(resp)
-                            current_files = [item.get("n") for item in resp.get("data", [])]
-                            # Check if at least one of the names exists
-                            # (Partial match is better than failing completely if some were deleted)
-                            found_count = sum(1 for name in names if name in current_files)
+                            # 用 _find_files_in_dir 查找（支持 search + list 双重查找）
+                            found_files = await self._find_files_in_dir(to_cid, names)
+                            found_count = len(found_files)
                             if found_count > 0:
                                 logger.info(f"✅ 在保存目录中找到 {found_count} 个同名文件，继续处理")
                                 # Continue to share creation with existing files
@@ -328,6 +324,108 @@ class P115Service:
             logger.error(f"❌ 检查链接状态失败: {share_url}, 错误: {e}")
             return None
 
+    async def _find_files_in_dir(self, cid: int, target_names: list) -> list:
+        """在指定目录中查找文件，使用多种方式确保找到
+        
+        优先使用 fs_search（按文件名搜索），失败后回退到 fs_files（列目录）。
+        
+        Args:
+            cid: 目录 ID
+            target_names: 要查找的文件名列表
+            
+        Returns:
+            匹配的文件列表 [{fid, name, size, time}, ...]
+        """
+        matched = []
+        
+        # 方式 1: 使用 fs_search 按文件名搜索（更可靠，不依赖目录缓存）
+        for name in target_names:
+            try:
+                search_resp = await self.client.fs_search(
+                    {"search_value": name, "cid": cid, "limit": 20}, 
+                    async_=True
+                )
+                check_response(search_resp)
+                search_data = search_resp.get("data", [])
+                
+                # fs_search 的结果可能在 data 数组或 data.list 中
+                if isinstance(search_data, dict):
+                    search_items = search_data.get("list", [])
+                else:
+                    search_items = search_data
+                
+                logger.debug(f"🔍 fs_search '{name}' 在 CID:{cid} 返回 {len(search_items)} 条结果")
+                
+                for item in search_items:
+                    item_name = item.get("n") or item.get("file_name")
+                    if item_name == name:
+                        item_id = item.get("fid") or item.get("cid") or item.get("file_id") or item.get("category_id")
+                        if item_id:
+                            matched.append({
+                                "fid": str(item_id),
+                                "name": item_name,
+                                "size": item.get("s", item.get("file_size", 0)),
+                                "time": item.get("te", 0),
+                            })
+                            logger.info(f"📄 fs_search 找到: {item_name} (ID: {item_id})")
+                            break
+            except Exception as e:
+                logger.warning(f"⚠️ fs_search 搜索 '{name}' 失败: {e}")
+        
+        if len(matched) == len(target_names):
+            return matched
+        
+        # 方式 2: 回退到 fs_files 列目录
+        found_names = {m["name"] for m in matched}
+        remaining_names = [n for n in target_names if n not in found_names]
+        logger.info(f"🔍 fs_search 找到 {len(matched)}/{len(target_names)} 个文件，尝试 fs_files 查找剩余: {remaining_names}")
+        
+        try:
+            resp = await self.client.fs_files({"cid": cid, "limit": 500, "show_dir": 1}, async_=True)
+            check_response(resp)
+            file_list = resp.get("data", [])
+            
+            # 检查 data 的类型，兼容不同响应格式
+            if isinstance(file_list, dict):
+                file_list = file_list.get("list", [])
+            
+            # 获取响应中的实际 CID，验证是否正确列出了目标目录
+            resp_path = resp.get("path", [])
+            resp_cid = None
+            if resp_path:
+                last_path = resp_path[-1] if isinstance(resp_path, list) else resp_path
+                resp_cid = last_path.get("cid") if isinstance(last_path, dict) else None
+            
+            actual_count = resp.get("count", "?")
+            logger.debug(f"📂 fs_files CID:{cid} 返回 {len(file_list)} 项 (总数: {actual_count}, 路径CID: {resp_cid})")
+            
+            # 验证返回的是否是正确的目录（防止 CID 不存在时回退到根目录）
+            if resp_cid is not None and str(resp_cid) != str(cid):
+                logger.warning(f"⚠️ fs_files 返回的目录 CID({resp_cid}) 与请求的 CID({cid}) 不匹配！可能目录不存在")
+            
+            # 日志打印目录中的前10个文件名，便于排查
+            if file_list:
+                dir_file_names = [item.get("n", "?") for item in file_list[:10]]
+                logger.debug(f"📋 目录内文件(前10): {dir_file_names}")
+            
+            for item in file_list:
+                item_name = item.get("n")
+                if item_name in remaining_names:
+                    item_id = item.get("fid") or item.get("cid")
+                    if item_id:
+                        matched.append({
+                            "fid": str(item_id),
+                            "name": item_name,
+                            "size": item.get("s", 0),
+                            "time": item.get("te", 0),
+                        })
+                        logger.info(f"📄 fs_files 找到: {item_name} (ID: {item_id})")
+                        
+        except Exception as e:
+            logger.warning(f"⚠️ fs_files 列目录失败: {e}")
+        
+        return matched
+
     async def create_share_link(self, save_result: dict):
         if not self.client or not save_result:
             return None
@@ -340,36 +438,19 @@ class P115Service:
             logger.info(f"⏳ 等待 10 秒以确保文件保存完成...")
             await asyncio.sleep(10)
             
-            # 6. Find the new file IDs with polling mechanism
+            # 6. Find files with polling (using search + list as fallback)
             new_fids = []
             matched_files = []
             
-            # Polling retry: try to find files and verify they are stable
-            max_poll_attempts = 3
+            max_poll_attempts = 5
             for poll_attempt in range(1, max_poll_attempts + 1):
                 try:
-                    resp = await self.client.fs_files({"cid": to_cid, "limit": 100}, async_=True)
-                    check_response(resp)
-                    file_list = resp.get("data", [])
+                    logger.info(f"🔍 开始查找文件 (第 {poll_attempt}/{max_poll_attempts} 次), 目标目录 CID: {to_cid}, 查找: {names}")
+                    current_matched = await self._find_files_in_dir(to_cid, names)
                     
-                    # More precise file matching: match by name and verify with timestamp
-                    current_matched = []
-                    for item in file_list:
-                        if item.get("n") in names:
-                            # Item can be file (fid) or folder (cid)
-                            item_id = item.get("fid") or item.get("cid")
-                            if item_id:
-                                current_matched.append({
-                                    "fid": str(item_id),
-                                    "name": item.get("n"),
-                                    "size": item.get("s", 0),
-                                    "time": item.get("te", 0)  # Modified time
-                                })
-                    
-                    # Check if files are stable (same count and sizes as previous poll)
                     if current_matched:
                         if matched_files:
-                            # Compare with previous poll: check if sizes match (file transfer complete)
+                            # Compare with previous poll
                             stable = len(current_matched) == len(matched_files)
                             if stable:
                                 for curr, prev in zip(sorted(current_matched, key=lambda x: x["fid"]), 
@@ -383,21 +464,21 @@ class P115Service:
                                 new_fids = [f["fid"] for f in current_matched]
                                 break
                             else:
-                                logger.debug(f"🔄 文件状态未稳定 (第 {poll_attempt}/{max_poll_attempts} 次轮询)，继续等待...")
+                                logger.debug(f"🔄 文件状态变化中 (第 {poll_attempt}/{max_poll_attempts} 次轮询)")
                         
                         matched_files = current_matched
                         
                         if poll_attempt < max_poll_attempts:
-                            await asyncio.sleep(3)  # Wait 3s between polls
+                            await asyncio.sleep(5)
                     else:
                         logger.warning(f"⚠️ 轮询未找到文件 (第 {poll_attempt}/{max_poll_attempts} 次)")
                         if poll_attempt < max_poll_attempts:
-                            await asyncio.sleep(3)
+                            await asyncio.sleep(5)
                             
                 except Exception as e:
-                    logger.warning(f"⚠️ 列出目录文件失败 (轮询 {poll_attempt}/{max_poll_attempts}): {e}")
+                    logger.warning(f"⚠️ 查找文件失败 (轮询 {poll_attempt}/{max_poll_attempts}): {e}")
                     if poll_attempt < max_poll_attempts:
-                        await asyncio.sleep(3)
+                        await asyncio.sleep(5)
             
             # If polling didn't find stable files, use the last matched files
             if not new_fids and matched_files:
@@ -470,7 +551,8 @@ class P115Service:
             return None
 
     async def cleanup_save_directory(self):
-        """Clean up the save directory"""
+        """Clean up the save directory by deleting the entire folder.
+        It will be automatically recreated by _ensure_save_dir on next save."""
         async with self._acquire_task_lock("cleanup"):
             logger.info("🧹 开始清理保存目录...")
             try:
@@ -479,22 +561,12 @@ class P115Service:
                     logger.error("无法获取保存目录 CID")
                     return False
 
-                # List files in save directory
-                resp = await self.client.fs_files({"cid": save_dir_cid, "limit": 100}, async_=True)
-                check_response(resp)
-                
-                file_list = resp.get("data", [])
-                if not file_list:
-                    logger.info("保存目录为空，无需清理")
-                    return True
-                
-                # Delete all files
-                fids = [item.get("fid") for item in file_list if item.get("fid")]
-                if fids:
-                   logger.info(f"正在删除 {len(fids)} 个文件...")
-                   del_resp = await self.client.fs_delete(fids, async_=True)
-                   check_response(del_resp)
-                   logger.info("清理完成")
+                # 直接删除整个保存目录文件夹
+                save_path = settings.P115_SAVE_DIR or "/分享保存"
+                logger.info(f"🗑️ 正在删除保存目录: {save_path} (CID: {save_dir_cid})")
+                del_resp = await self.client.fs_delete(str(save_dir_cid), async_=True)
+                check_response(del_resp)
+                logger.info(f"✅ 保存目录已删除，下次保存时将自动重建")
                 return True
             except Exception as e:
                 logger.error(f"清理保存目录失败: {e}")
