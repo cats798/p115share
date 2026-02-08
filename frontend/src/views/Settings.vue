@@ -26,9 +26,9 @@
           </a-form-item>
           
           <a-divider />
-          <a-button type="primary" @click="onFinish" :loading="loading" block>保存 Telegram 配置</a-button>
+          <a-button type="primary" @click="onFinish('tg')" :loading="loading" block>保存 Telegram 配置</a-button>
         </a-collapse-panel>
-
+ 
         <a-collapse-panel key="p115" header="115 网盘配置">
           <a-form-item label="Cookie" name="p115_cookie">
             <a-textarea v-model:value="formState.p115_cookie" :rows="4" placeholder="请输入 115 Cookie" />
@@ -49,9 +49,9 @@
           </a-form-item>
           
           <a-divider />
-          <a-button type="primary" @click="onFinish" :loading="loading" block>保存 115 配置</a-button>
+          <a-button type="primary" @click="onFinish('p115')" :loading="loading" block>保存 115 配置</a-button>
         </a-collapse-panel>
-
+ 
         <a-collapse-panel key="proxy" header="代理配置">
           <a-form-item label="启用代理" style="margin-bottom: 16px">
             <a-switch v-model:checked="formState.proxy_enabled" />
@@ -70,7 +70,7 @@
                 </a-form-item>
               </a-col>
             </a-row>
-
+ 
             <a-row :gutter="16">
               <a-col :span="12">
                 <a-form-item label="用户名 (可选)" name="proxy_user">
@@ -83,7 +83,7 @@
                 </a-form-item>
               </a-col>
             </a-row>
-
+ 
             <a-row :gutter="16">
               <a-col :span="14">
                 <a-form-item label="协议类型" name="proxy_type" style="margin-bottom: 0">
@@ -101,14 +101,14 @@
                 </a-button>
               </a-col>
             </a-row>
-
+ 
             <div style="margin-top: 24px; display: flex; gap: 8px">
               <a-button @click="testProxy" :loading="testingProxy">测试代理连接</a-button>
             </div>
           </div>
           
           <a-divider />
-          <a-button type="primary" @click="onFinish" :loading="loading" block>保存代理配置</a-button>
+          <a-button type="primary" @click="onFinish('proxy')" :loading="loading" block>保存代理配置</a-button>
         </a-collapse-panel>
       </a-collapse>
     </a-form>
@@ -203,18 +203,38 @@ const loadConfig = async () => {
   }
 };
 
-const onFinish = async () => {
+const onFinish = async (section: 'tg' | 'p115' | 'proxy' = 'tg') => {
   try {
-    await formRef.value.validate();
+    // Define which fields belong to which section
+    const sectionFields: Record<string, string[]> = {
+      tg: ['tg_bot_token', 'tg_channel_id', 'tg_user_id', 'tg_allow_chats'],
+      p115: ['p115_cookie', 'p115_save_dir', 'p115_cleanup_dir_cron', 'p115_cleanup_trash_cron', 'p115_recycle_password'],
+      proxy: ['proxy_enabled', 'proxy_host', 'proxy_port', 'proxy_user', 'proxy_pass', 'proxy_type']
+    };
+
+    // Validate only related fields if possible (or just validate all for simplicity, 
+    // but only send the relevant ones)
+    await formRef.value.validate(sectionFields[section]);
+    
     loading.value = true;
-    await axios.post('/api/config/update', formState);
-    message.success('配置已保存');
+    
+    // Create a dynamic payload containing ONLY the fields for this section
+    const payload: Record<string, any> = {};
+    sectionFields[section].forEach(field => {
+      payload[field] = (formState as any)[field];
+    });
+
+    const res = await axios.post('/api/config/update', payload);
+    message.success(section === 'tg' ? 'Telegram 配置已保存' : section === 'p115' ? '115 网盘配置已保存' : '代理配置已保存');
+    if (res.data.bot_restarted) {
+      message.info('机器人已根据新配置安全重启');
+    }
   } catch (e: any) {
     if (e.errorFields) {
       message.error('请检查表单填写是否正确');
     } else {
       console.error(e);
-      message.error(e.response?.data?.detail?.[0]?.msg || '保存失败');
+      message.error(e.response?.data?.detail || '保存失败');
     }
   } finally {
     loading.value = false;

@@ -11,28 +11,30 @@ from apscheduler.triggers.cron import CronTrigger
 
 router = APIRouter(prefix="/config", tags=["config"])
 
+from typing import Optional
+
 class ConfigUpdate(BaseModel):
-    tg_bot_token: str = Field(..., min_length=1)
-    tg_channel_id: str = Field(..., min_length=1)
-    tg_user_id: str = Field(..., min_length=1)
-    tg_allow_chats: str = Field(..., min_length=1)
-    p115_cookie: str = Field(..., min_length=1)
-    p115_save_dir: str = Field(..., min_length=1)
-    p115_cleanup_dir_cron: str = ""
-    p115_cleanup_trash_cron: str = ""
-    p115_recycle_password: str = ""
-    proxy_enabled: bool = False
-    proxy_host: str = ""
-    proxy_port: str = ""
-    proxy_user: str = ""
-    proxy_pass: str = ""
-    proxy_type: str = "HTTP"
+    tg_bot_token: Optional[str] = None
+    tg_channel_id: Optional[str] = None
+    tg_user_id: Optional[str] = None
+    tg_allow_chats: Optional[str] = None
+    p115_cookie: Optional[str] = None
+    p115_save_dir: Optional[str] = None
+    p115_cleanup_dir_cron: Optional[str] = None
+    p115_cleanup_trash_cron: Optional[str] = None
+    p115_recycle_password: Optional[str] = None
+    proxy_enabled: Optional[bool] = None
+    proxy_host: Optional[str] = None
+    proxy_port: Optional[str] = None
+    proxy_user: Optional[str] = None
+    proxy_pass: Optional[str] = None
+    proxy_type: Optional[str] = None
 
     @field_validator('p115_cleanup_dir_cron', 'p115_cleanup_trash_cron')
     @classmethod
-    def validate_cron(cls, v: str):
-        if not v:
-            return ""
+    def validate_cron(cls, v: Optional[str]):
+        if v is None or v == "":
+            return v
         try:
             CronTrigger.from_crontab(v)
             return v
@@ -41,73 +43,72 @@ class ConfigUpdate(BaseModel):
 
 @router.post("/update")
 async def update_config(cfg: ConfigUpdate, user=Depends(get_current_user)):
-    need_restart_bot = False
+    # Use model_dump(exclude_unset=True) to get only fields sent by frontend
+    update_data = cfg.model_dump(exclude_unset=True)
+    if not update_data:
+        return {"status": "success", "message": "无变更"}
     
-    # Update TG settings
-    if settings.TG_BOT_TOKEN != cfg.tg_bot_token:
+    logger.info(f"⚙️ 收到配置更新请求，包含字段: {list(update_data.keys())}")
+    need_restart_bot = False
+    proxy_changed = False
+    
+    # 1. Update TG settings
+    if "tg_bot_token" in update_data and settings.TG_BOT_TOKEN != cfg.tg_bot_token:
         await settings.save_setting("TG_BOT_TOKEN", cfg.tg_bot_token)
         need_restart_bot = True
         
-    await settings.save_setting("TG_CHANNEL_ID", cfg.tg_channel_id)
-    await settings.save_setting("TG_USER_ID", cfg.tg_user_id)
-    await settings.save_setting("TG_ALLOW_CHATS", cfg.tg_allow_chats)
+    if "tg_channel_id" in update_data:
+        await settings.save_setting("TG_CHANNEL_ID", cfg.tg_channel_id)
+    if "tg_user_id" in update_data:
+        await settings.save_setting("TG_USER_ID", cfg.tg_user_id)
+    if "tg_allow_chats" in update_data:
+        await settings.save_setting("TG_ALLOW_CHATS", cfg.tg_allow_chats)
     
-    # Update 115 settings
-    if settings.P115_COOKIE != cfg.p115_cookie:
+    # 2. Update 115 settings
+    if "p115_cookie" in update_data and settings.P115_COOKIE != cfg.p115_cookie:
         await settings.save_setting("P115_COOKIE", cfg.p115_cookie)
         p115_service.init_client(cfg.p115_cookie)
         
-    await settings.save_setting("P115_SAVE_DIR", cfg.p115_save_dir)
-    await settings.save_setting("P115_RECYCLE_PASSWORD", cfg.p115_recycle_password)
+    if "p115_save_dir" in update_data:
+        await settings.save_setting("P115_SAVE_DIR", cfg.p115_save_dir)
+    if "p115_recycle_password" in update_data:
+        await settings.save_setting("P115_RECYCLE_PASSWORD", cfg.p115_recycle_password)
     
-    # Update Proxy settings
-    proxy_changed = False
-    if settings.PROXY_ENABLED != cfg.proxy_enabled:
-        await settings.save_setting("PROXY_ENABLED", cfg.proxy_enabled)
-        proxy_changed = True
-    if settings.PROXY_HOST != cfg.proxy_host:
-        await settings.save_setting("PROXY_HOST", cfg.proxy_host)
-        proxy_changed = True
-    if settings.PROXY_PORT != cfg.proxy_port:
-        await settings.save_setting("PROXY_PORT", cfg.proxy_port)
-        proxy_changed = True
-    if settings.PROXY_USER != cfg.proxy_user:
-        await settings.save_setting("PROXY_USER", cfg.proxy_user)
-        proxy_changed = True
-    if settings.PROXY_PASS != cfg.proxy_pass:
-        await settings.save_setting("PROXY_PASS", cfg.proxy_pass)
-        proxy_changed = True
-    if settings.PROXY_TYPE != cfg.proxy_type:
-        await settings.save_setting("PROXY_TYPE", cfg.proxy_type)
-        proxy_changed = True
+    # 3. Update Proxy settings
+    proxy_fields = ["proxy_enabled", "proxy_host", "proxy_port", "proxy_user", "proxy_pass", "proxy_type"]
+    for field in proxy_fields:
+        if field in update_data:
+            current_val = getattr(settings, field.upper())
+            new_val = getattr(cfg, field)
+            if current_val != new_val:
+                await settings.save_setting(field.upper(), new_val)
+                proxy_changed = True
     
     # Reinitialize services if proxy changed
     if proxy_changed:
-        logger.info("🌐 代理设置已更新，重新初始化服务...")
+        logger.info("🌐 代理设置内容已发生实质变化，重新初始化相关服务...")
         if settings.P115_COOKIE:
             p115_service.init_client(settings.P115_COOKIE)
         if settings.TG_BOT_TOKEN:
-            # Removed direct init_bot call to avoid conflict
             need_restart_bot = True
     
-    # Update Cron tasks
-    if settings.P115_CLEANUP_DIR_CRON != cfg.p115_cleanup_dir_cron:
+    # 4. Update Cron tasks
+    if "p115_cleanup_dir_cron" in update_data and settings.P115_CLEANUP_DIR_CRON != cfg.p115_cleanup_dir_cron:
         await settings.save_setting("P115_CLEANUP_DIR_CRON", cfg.p115_cleanup_dir_cron)
         from app.services.scheduler import cleanup_scheduler
         cleanup_scheduler.update_cleanup_dir_job()
         
-    if settings.P115_CLEANUP_TRASH_CRON != cfg.p115_cleanup_trash_cron:
+    if "p115_cleanup_trash_cron" in update_data and settings.P115_CLEANUP_TRASH_CRON != cfg.p115_cleanup_trash_cron:
         await settings.save_setting("P115_CLEANUP_TRASH_CRON", cfg.p115_cleanup_trash_cron)
         from app.services.scheduler import cleanup_scheduler
         cleanup_scheduler.update_cleanup_trash_job()
     
-    # Unified restart bot polling
+    # 5. Unified restart bot polling
     if need_restart_bot:
         asyncio.create_task(tg_service.restart_polling())
         logger.info("🔄 正在触发机器人安全重启任务...")
     
-    logger.info("Configuration updated and saved to database")
-    return {"status": "success", "bot_restarted": need_restart_bot}
+    return {"status": "success", "bot_restarted": need_restart_bot, "updated_fields": list(update_data.keys())}
 
 @router.get("/")
 async def get_config(user=Depends(get_current_user)):
