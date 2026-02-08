@@ -195,6 +195,14 @@ const profileForm = reactive({
   avatar_url: auth.user?.avatar_url || '/logo.png'
 });
 
+// 监听模态框打开，同步最新的头像URL
+watch(showProfileModal, (isOpen) => {
+  if (isOpen) {
+    profileForm.avatar_url = auth.user?.avatar_url || '/logo.png';
+    profileForm.password = '';
+  }
+});
+
 const handleUploadChange = (info: any) => {
   if (info.file.status === 'uploading') {
     uploading.value = true;

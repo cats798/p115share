@@ -20,6 +20,10 @@ config.json.bak
 .DS_Store
 Thumbs.db
 
+# User uploaded avatars
+backend/static/avatars/*
+!backend/static/avatars/.gitkeep
+
 # Docker
 .docker/
 
