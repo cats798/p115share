@@ -1,5 +1,6 @@
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
+from aiogram.client.session.aiohttp import AiohttpSession
 from app.core.config import settings
 from app.services.p115 import p115_service
 from loguru import logger
@@ -16,7 +17,14 @@ class TGService:
 
     def init_bot(self, token: str):
         try:
-            self.bot = Bot(token=token)
+            # Configure proxy if set
+            session = None
+            if settings.HTTP_PROXY or settings.HTTPS_PROXY:
+                proxy = settings.HTTPS_PROXY or settings.HTTP_PROXY
+                session = AiohttpSession(proxy=proxy)
+                logger.info(f"Telegram Bot using proxy: {proxy}")
+                
+            self.bot = Bot(token=token, session=session)
             self.dp = Dispatcher()
             self._register_handlers()
             logger.info("Telegram Bot initialized successfully")

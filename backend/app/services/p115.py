@@ -22,9 +22,22 @@ class P115Service:
 
     def init_client(self, cookie: str):
         try:
+            # Apply proxy settings to environment if configured
+            import os
+            if settings.HTTP_PROXY:
+                os.environ['HTTP_PROXY'] = settings.HTTP_PROXY
+                os.environ['http_proxy'] = settings.HTTP_PROXY
+            if settings.HTTPS_PROXY:
+                os.environ['HTTPS_PROXY'] = settings.HTTPS_PROXY
+                os.environ['https_proxy'] = settings.HTTPS_PROXY
+                
             self.client = P115Client(cookie, check_for_relogin=True)
             self.fs = P115FileSystem(self.client)
-            logger.info("P115Client and FileSystem initialized successfully")
+            
+            proxy_info = ""
+            if settings.HTTP_PROXY or settings.HTTPS_PROXY:
+                proxy_info = f" (Proxy: HTTP={settings.HTTP_PROXY or 'None'}, HTTPS={settings.HTTPS_PROXY or 'None'})"
+            logger.info(f"P115Client and FileSystem initialized successfully{proxy_info}")
         except Exception as e:
             logger.error(f"Failed to initialize P115Client: {e}")
             self.client = None

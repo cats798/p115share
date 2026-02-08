@@ -45,6 +45,17 @@
             <a-input-password v-model:value="formState.p115_recycle_password" placeholder="留空则无密码" />
           </a-form-item>
         </a-collapse-panel>
+
+        <a-collapse-panel key="proxy" header="代理配置（可选）">
+          <a-form-item label="HTTP Proxy" name="http_proxy">
+            <a-input v-model:value="formState.http_proxy" placeholder="例如 http://192.168.0.12:7890" />
+            <div style="font-size: 12px; color: #999; margin-top: 4px">支持带认证：http://user:pass@host:port</div>
+          </a-form-item>
+          <a-form-item label="HTTPS Proxy" name="https_proxy">
+            <a-input v-model:value="formState.https_proxy" placeholder="例如 http://192.168.0.12:7890" />
+            <div style="font-size: 12px; color: #999; margin-top: 4px">支持带认证：http://user:pass@host:port</div>
+          </a-form-item>
+        </a-collapse-panel>
       </a-collapse>
 
       <a-form-item style="margin-top: 24px">
@@ -70,7 +81,9 @@ const formState = reactive({
   p115_save_dir: '',
   p115_cleanup_dir_cron: '',
   p115_cleanup_trash_cron: '',
-  p115_recycle_password: ''
+  p115_recycle_password: '',
+  http_proxy: '',
+  https_proxy: ''
 });
 
 const validateCron = (_rule: any, value: string) => {
@@ -106,6 +119,8 @@ const loadConfig = async () => {
     formState.p115_cleanup_dir_cron = res.data.p115_cleanup_dir_cron || '';
     formState.p115_cleanup_trash_cron = res.data.p115_cleanup_trash_cron || '';
     formState.p115_recycle_password = res.data.p115_recycle_password || '';
+    formState.http_proxy = res.data.http_proxy || '';
+    formState.https_proxy = res.data.https_proxy || '';
   } catch (e) {
     console.error(e);
   }

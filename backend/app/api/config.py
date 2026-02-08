@@ -20,6 +20,8 @@ class ConfigUpdate(BaseModel):
     p115_cleanup_dir_cron: str = ""
     p115_cleanup_trash_cron: str = ""
     p115_recycle_password: str = ""
+    http_proxy: str = ""
+    https_proxy: str = ""
 
     @field_validator('p115_cleanup_dir_cron', 'p115_cleanup_trash_cron')
     @classmethod
@@ -54,6 +56,24 @@ async def update_config(cfg: ConfigUpdate, user=Depends(get_current_user)):
     await settings.save_setting("P115_SAVE_DIR", cfg.p115_save_dir)
     await settings.save_setting("P115_RECYCLE_PASSWORD", cfg.p115_recycle_password)
     
+    # Update Proxy settings
+    proxy_changed = False
+    if settings.HTTP_PROXY != cfg.http_proxy:
+        await settings.save_setting("HTTP_PROXY", cfg.http_proxy)
+        proxy_changed = True
+    if settings.HTTPS_PROXY != cfg.https_proxy:
+        await settings.save_setting("HTTPS_PROXY", cfg.https_proxy)
+        proxy_changed = True
+    
+    # Reinitialize services if proxy changed
+    if proxy_changed:
+        logger.info("🌐 代理设置已更新，重新初始化服务...")
+        if settings.P115_COOKIE:
+            p115_service.init_client(settings.P115_COOKIE)
+        if settings.TG_BOT_TOKEN:
+            tg_service.init_bot(settings.TG_BOT_TOKEN)
+            need_restart_bot = True
+    
     # Update Cron tasks
     if settings.P115_CLEANUP_DIR_CRON != cfg.p115_cleanup_dir_cron:
         await settings.save_setting("P115_CLEANUP_DIR_CRON", cfg.p115_cleanup_dir_cron)
@@ -87,7 +107,9 @@ async def get_config(user=Depends(get_current_user)):
         "p115_cleanup_dir_cron": settings.P115_CLEANUP_DIR_CRON,
         "p115_cleanup_trash_cron": settings.P115_CLEANUP_TRASH_CRON,
         "p115_recycle_password": settings.P115_RECYCLE_PASSWORD,
-        "version": "1.0.7"
+        "http_proxy": settings.HTTP_PROXY,
+        "https_proxy": settings.HTTPS_PROXY,
+        "version": "1.0.8"
     }
 
 @router.post("/test-bot")

@@ -26,6 +26,10 @@ class Settings(BaseSettings):
     P115_CLEANUP_DIR_CRON: str = "0 3 * * *"
     P115_CLEANUP_TRASH_CRON: str = "0 4 * * *"
     P115_RECYCLE_PASSWORD: str = ""
+    
+    # Proxy settings
+    HTTP_PROXY: str = ""
+    HTTPS_PROXY: str = ""
 
     async def init_db(self):
         """Initialize database tables and migrate from JSON if needed"""

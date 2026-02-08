@@ -45,6 +45,30 @@ docker run -d \
 
 > **说明**：首次运行会自动在 `./data` 目录下生成 `p115share.db` 数据库文件。
 
+**如需配置代理：**
+```bash
+docker run -d \
+  -p 8000:8000 \
+  -e TZ=Asia/Shanghai \
+  -e HTTP_PROXY=http://192.168.0.12:7890 \
+  -e HTTPS_PROXY=http://192.168.0.12:7890 \
+  -v $(pwd)/data:/app/data \
+  --restart unless-stopped \
+  listeningltg/p115-share:latest
+```
+
+**代理需要认证时：**
+```bash
+docker run -d \
+  -p 8000:8000 \
+  -e TZ=Asia/Shanghai \
+  -e HTTP_PROXY=http://username:password@192.168.0.12:7890 \
+  -e HTTPS_PROXY=http://username:password@192.168.0.12:7890 \
+  -v $(pwd)/data:/app/data \
+  --restart unless-stopped \
+  listeningltg/p115-share:latest
+```
+
 ### 方式二：使用 Docker Compose
 
 创建 `docker-compose.yml` 文件：
@@ -62,6 +86,10 @@ services:
       - ./data:/app/data
     environment:
       - TZ=Asia/Shanghai
+      # - HTTP_PROXY=http://192.168.0.12:7890  # 可选：配置代理
+      # - HTTPS_PROXY=http://192.168.0.12:7890
+      # - HTTP_PROXY=http://username:password@192.168.0.12:7890  # 带认证的代理
+      # - HTTPS_PROXY=http://username:password@192.168.0.12:7890
     restart: unless-stopped
 ```
 
@@ -88,8 +116,9 @@ docker compose up -d --build
   - **TG Bot Token**：从 [@BotFather](https://t.me/BotFather) 获取。
   - **TG 用户 ID**：您的 Telegram ID（点击“测试机器人”获取）。
   - **白名单配置**：允许触发机器人的聊天 ID（用英文逗号分隔）。
-  - **TG 频道 ID**：用于广播分享的频道 ID（**注意：Bot 必须被设为该频道的管理员才能发送消息**）。
-- 点击“保存配置”后，系统将持续运行。
+  - **TG 频道 ID**：用于广播分享的频道 ID（**注意：Bot 必须被设为该频道的管理员才能发送消息**）。  - **代理配置**（可选）：如需代理访问，可在"代理配置"面板中填写。支持格式：
+    - 无认证：`http://192.168.0.12:7890`
+    - 带认证：`http://username:password@192.168.0.12:7890`- 点击“保存配置”后，系统将持续运行。
 
 ---
 
@@ -101,6 +130,8 @@ docker compose up -d --build
 | `P115_CLEANUP_DIR_CRON` | 清理保存目录的周期 | `*/30 * * * *` |
 | `P115_CLEANUP_TRASH_CRON` | 清理回收站的周期 | `0 */2 * * *` |
 | `P115_RECYCLE_PASSWORD` | 115 回收站安全密码 | `空` |
+| `HTTP_PROXY` | HTTP 代理地址（可选） | `空` |
+| `HTTPS_PROXY` | HTTPS 代理地址（可选） | `空` |
 
 ---
 
