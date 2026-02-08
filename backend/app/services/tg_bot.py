@@ -53,49 +53,51 @@ class TGService:
     async def _cleanup_bot(self, bot_instance=None):
         """Thoroughly clean up specified or current bot instance and its session"""
         target_bot = bot_instance or self.bot
+        prefix = f"[Cleanup-Internal]" if bot_instance else f"[Cleanup-Main-ID:{self._current_polling_id}]"
+        
         if target_bot:
             try:
                 # Log with safe ID access (bot.id is an int)
                 bot_id_str = str(getattr(target_bot, 'id', 'unknown'))
-                logger.debug(f"Cleaning up bot instance (ID: {bot_id_str[:5]}...)")
+                logger.debug(f"{prefix} 🧹 正在清理 Bot 实例 (ID: {bot_id_str[:5]}...)")
                 
                 # 0. Cancel all pending verify tasks
+                num_v = len(self._verify_tasks)
                 for vt in self._verify_tasks[:]:
                     if not vt.done():
                         vt.cancel()
                 self._verify_tasks.clear()
+                if num_v > 0:
+                    logger.debug(f"{prefix} 已取消 {num_v} 个验证任务")
                 
-                # 1. Try to delete webhook as a safety measure to stop delivery
+                # 1. Webhook Cleanup (best effort, may fail if proxy is broken)
                 try:
-                    # Increase timeout for better reliability
-                    await asyncio.wait_for(target_bot.delete_webhook(drop_pending_updates=True), timeout=5.0)
-                    logger.debug("Bot webhook deleted and pending updates dropped")
+                    logger.debug(f"{prefix} 正在尝试删除 Webhook...")
+                    await asyncio.wait_for(target_bot.delete_webhook(drop_pending_updates=True), timeout=3.0)
+                    logger.debug(f"{prefix} ✅ Webhook 已删除")
                 except asyncio.TimeoutError:
-                    logger.debug("Webhook deletion timeout - continuing cleanup")
+                    logger.debug(f"{prefix} Webhook 删除超时 (代理可能已失效)，跳过")
                 except Exception as ex:
-                    logger.debug(f"Non-critical: Could not delete webhook: {ex}")
+                    logger.debug(f"{prefix} Webhook 删除失败 (非致命): {ex}")
 
-                # 2. Try to send getMe to clear any pending connections
-                try:
-                    await asyncio.wait_for(target_bot.close(), timeout=3.0)
-                    logger.debug("Bot connection closed")
-                except Exception as ex:
-                    logger.debug(f"Bot close error (non-critical): {ex}")
-
-                # 3. Close session
+                # 2. 直接关闭 HTTP 会话 (强制断开所有 TCP 连接)
+                #    注意：不调用 bot.close()，那是 Telegram Bot API 的 /close 端点，
+                #    用于关闭本地 Bot API Server，不是关闭客户端连接
                 if hasattr(target_bot, 'session') and target_bot.session:
                     try:
+                        logger.debug(f"{prefix} 正在强制关闭 HTTP 会话...")
                         await target_bot.session.close()
-                        logger.debug("Bot session closed successfully")
+                        logger.debug(f"{prefix} ✅ HTTP 会话已关闭，所有 TCP 连接已断开")
                     except Exception as ex:
-                        logger.debug(f"Session close error: {ex}")
+                        logger.debug(f"{prefix} HTTP 会话关闭出错: {ex}")
             except Exception as e:
-                logger.error(f"Error during bot session closure: {e}")
+                logger.error(f"{prefix} ❌ 清理过程中发生严重错误: {e}")
             finally:
-                if not bot_instance: # Only clear class variables if cleaning current bot
+                if not bot_instance:
                     self.bot = None
                     self.dp = None
                     self.is_connected = False
+                    logger.debug(f"{prefix} 状态变量已重置为 None")
 
     def _get_allowed_chats(self):
         if not settings.TG_ALLOW_CHATS:
@@ -244,7 +246,7 @@ class TGService:
 
                             await self.bot.send_photo(
                                 settings.TG_CHANNEL_ID,
-                                photo=photo_id,
+                                photo=photo.file_id, # Changed from photo_id to photo.file_id
                                 caption=new_text,
                                 caption_entities=new_entities
                             )
@@ -719,74 +721,119 @@ class TGService:
         if self.dp and self.bot:
             self._current_polling_id += 1
             p_id = self._current_polling_id
+            prefix = f"[Polling-ID:{p_id}]"
             try:
-                logger.info(f"Starting Telegram Bot polling (ID: {p_id})...")
+                logger.info(f"{prefix} 🚀 正在启动轮询 (跳过历史累积消息: True)...")
                 # Using skip_updates=True to avoid processing old messages after restart
-                await self.dp.start_polling(self.bot, skip_updates=True, handle_signals=False)
+                await self.dp.start_polling(
+                    self.bot, 
+                    skip_updates=True, 
+                    handle_signals=False,
+                )
             except asyncio.CancelledError:
-                logger.info(f"✅ Telegram Bot polling (ID: {p_id}) was cancelled")
+                logger.info(f"{prefix} 🛑 轮询任务被主动取消 (正常流程)")
                 raise
             except Exception as e:
                 err_msg = str(e)
                 # Filter out verbose stack traces for common network/proxy issues
                 if any(x in err_msg for x in ["ProxyConnectionError", "Timeout", "Cannot connect", "远程计算机拒绝"]):
-                    logger.warning(f"⚠️ Telegram Bot 轮询 (ID: {p_id}) 因网络/代理连接问题中断: {err_msg}")
+                    logger.warning(f"{prefix} ⚠️ 轮询由于网络/代理问题中断: {err_msg}")
                 else:
-                    logger.error(f"❌ Telegram Bot 轮询 (ID: {p_id}) 发生意外错误: {e}")
+                    logger.error(f"{prefix} ❌ 发生意外报错: {e}")
                     import traceback
                     logger.debug(traceback.format_exc())
             finally:
-                logger.debug(f"Polling task (ID: {p_id}) ended")
+                logger.debug(f"{prefix} 🏁 轮询任务生命周期结束")
 
     async def stop_polling(self):
-        """Stop current polling task and ensure dispatcher stops"""
-        if self.polling_task and not self.polling_task.done():
-            logger.debug("Cancelling polling task...")
-            self.polling_task.cancel()
-            try:
-                await self.polling_task
-            except asyncio.CancelledError:
-                logger.info("✅ Telegram Bot polling stopped")
-            except Exception as e:
-                logger.debug(f"Error while stopping polling: {e}")
-            self.polling_task = None
-        
-        # Ensure dispatcher stops as well
+        """Stop current polling task gracefully, then force-cancel if needed"""
+        # 1. 先通知 Dispatcher 优雅停止 (它会结束当前 getUpdates 请求后退出循环)
         if self.dp:
             try:
                 await self.dp.stop_polling()
-                logger.debug("Dispatcher polling stopped")
+                logger.debug("Dispatcher 已收到停止信号")
             except Exception as e:
-                logger.debug(f"Dispatcher stop error (non-critical): {e}")
+                logger.debug(f"Dispatcher stop_polling 调用异常 (非致命): {e}")
+        
+        # 2. 等待轮询任务自然结束，超时后强制取消
+        if self.polling_task and not self.polling_task.done():
+            try:
+                # 给 3 秒时间让 dispatcher 优雅退出
+                await asyncio.wait_for(asyncio.shield(self.polling_task), timeout=3.0)
+                logger.info("✅ Telegram Bot polling 已优雅停止")
+            except asyncio.TimeoutError:
+                # 优雅停止超时，强制取消
+                logger.debug("优雅停止超时，强制取消 polling task...")
+                self.polling_task.cancel()
+                try:
+                    await self.polling_task
+                except (asyncio.CancelledError, Exception):
+                    pass
+                logger.info("✅ Telegram Bot polling 已强制停止")
+            except (asyncio.CancelledError, Exception) as e:
+                logger.debug(f"等待 polling 结束时出错: {e}")
+            self.polling_task = None
 
     async def restart_polling(self):
         """Restart polling with updated configuration, ensuring no conflicts"""
+        logger.debug(f"尝试进入重启原子锁... (当前 ID: {self._current_polling_id})")
         async with self._lock:
-            logger.info("🔄 Telegram Bot 正在尝试安全重启...")
+            logger.info("🔄 Telegram Bot 正在开始安全重启流程...")
             
             # 1. Stop current polling task
             await self.stop_polling()
             
-            # 2. Cleanup session and remove old bot instance
+            # 2. Cleanup old bot instance (session, tasks, etc.)
             await self._cleanup_bot()
             
-            # 3. Wait longer for Telegram server to fully register disconnection
-            # This is crucial to avoid "getUpdates conflict" errors
-            logger.debug("Waiting for Telegram server to process disconnection...")
+            # 3. Wait for old connections to fully time out on Telegram side
+            logger.debug("⏳ 正在等待 Telegram 服务器刷新连接状态 (5s)...")
             await asyncio.sleep(5)
             
             # 4. Initialize new bot with current settings
-            if settings.TG_BOT_TOKEN:
-                self.init_bot(settings.TG_BOT_TOKEN)
-                if self.bot and self.dp:
-                    # Add small delay before starting polling
-                    await asyncio.sleep(1)
-                    self.polling_task = asyncio.create_task(self.start_polling())
-                    logger.info("✅ Telegram Bot 轮询已重启，运行正常")
-                else:
-                    logger.error("❌ Telegram Bot 重新初始化失败")
-            else:
+            if not settings.TG_BOT_TOKEN:
                 logger.warning("⚠️ 未配置 Bot Token，跳过启动")
+                return
+            
+            logger.debug("正在重新初始化 Bot 实例...")
+            self.init_bot(settings.TG_BOT_TOKEN)
+            if not self.bot or not self.dp:
+                logger.error("❌ Telegram Bot 重新初始化失败")
+                return
+            
+            # 5. 用新 Bot (有正确连接) 主动抢占 Telegram 服务器端的 getUpdates 位
+            #    这是解决 ConflictError 的关键：旧 Bot 的代理坏了无法通知 Telegram 断开，
+            #    但新 Bot 发送 getUpdates 可以让 Telegram 主动踢掉旧的长轮询连接
+            try:
+                logger.debug("新 Bot 正在清除 Telegram 服务端残留状态...")
+                await asyncio.wait_for(
+                    self.bot.delete_webhook(drop_pending_updates=True), 
+                    timeout=10.0
+                )
+                logger.debug("✅ Webhook 已清除")
+            except Exception as e:
+                logger.warning(f"新 Bot 清除 webhook 失败: {e}")
+            
+            # 6. 用 getUpdates(offset=-1, timeout=0) 抢占轮询位
+            #    timeout=0 表示立即返回，不建立新的长轮询
+            #    这会让 Telegram 断开任何现存的旧 getUpdates 长连接
+            for attempt in range(3):
+                try:
+                    await asyncio.wait_for(
+                        self.bot.get_updates(offset=-1, timeout=0),
+                        timeout=10.0
+                    )
+                    logger.debug(f"✅ getUpdates 抢占成功 (第 {attempt+1} 次)")
+                    break
+                except Exception as e:
+                    logger.debug(f"getUpdates 抢占第 {attempt+1} 次失败: {e}")
+                    if attempt < 2:
+                        await asyncio.sleep(2)
+            
+            # 7. 等待 Telegram 服务器彻底释放旧连接
+            await asyncio.sleep(2)
+            self.polling_task = asyncio.create_task(self.start_polling())
+            logger.info("✅ Telegram Bot 轮询已重启，运行正常")
 
     async def test_send_to_user(self):
         if not self.bot or not settings.TG_USER_ID:
