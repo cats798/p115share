@@ -15,6 +15,7 @@ class P115Service:
     def __init__(self):
         self.client = None
         self.fs = None
+        self.is_connected = False
         self._task_lock: Optional[asyncio.Lock] = None  # Lazy initialize
         self._current_task: str | None = None  # Track current task type
         if settings.P115_COOKIE:
@@ -24,24 +25,30 @@ class P115Service:
         try:
             # Apply proxy settings to environment if configured
             import os
-            if settings.HTTP_PROXY:
-                os.environ['HTTP_PROXY'] = settings.HTTP_PROXY
-                os.environ['http_proxy'] = settings.HTTP_PROXY
-            if settings.HTTPS_PROXY:
-                os.environ['HTTPS_PROXY'] = settings.HTTPS_PROXY
-                os.environ['https_proxy'] = settings.HTTPS_PROXY
+            if settings.PROXY_ENABLED and settings.PROXY_HOST and settings.PROXY_PORT:
+                proxy_type = settings.PROXY_TYPE.lower()
+                auth = f"{settings.PROXY_USER}:{settings.PROXY_PASS}@" if settings.PROXY_USER and settings.PROXY_PASS else ""
+                proxy_url = f"{proxy_type}://{auth}{settings.PROXY_HOST}:{settings.PROXY_PORT}"
+                
+                os.environ['HTTP_PROXY'] = proxy_url
+                os.environ['http_proxy'] = proxy_url
+                os.environ['HTTPS_PROXY'] = proxy_url
+                os.environ['https_proxy'] = proxy_url
                 
             self.client = P115Client(cookie, check_for_relogin=True)
             self.fs = P115FileSystem(self.client)
             
             proxy_info = ""
-            if settings.HTTP_PROXY or settings.HTTPS_PROXY:
-                proxy_info = f" (Proxy: HTTP={settings.HTTP_PROXY or 'None'}, HTTPS={settings.HTTPS_PROXY or 'None'})"
+            if settings.PROXY_ENABLED:
+                proxy_info = f" (Proxy: {settings.PROXY_TYPE}://{settings.PROXY_HOST}:{settings.PROXY_PORT})"
             logger.info(f"P115Client and FileSystem initialized successfully{proxy_info}")
+            # Verify connection asynchronously
+            asyncio.create_task(self.verify_connection())
         except Exception as e:
             logger.error(f"Failed to initialize P115Client: {e}")
             self.client = None
             self.fs = None
+            self.is_connected = False
 
     @asynccontextmanager
     async def _acquire_task_lock(self, task_type: Literal["save_share", "cleanup"]):
@@ -66,6 +73,27 @@ class P115Service:
             finally:
                 self._current_task = None
                 logger.info(f"🔓 {task_type} 任务已释放锁")
+
+    async def verify_connection(self) -> bool:
+        """Verify the 115 cookie connection"""
+        if not self.client:
+            self.is_connected = False
+            return False
+            
+        try:
+            # Simple API call to verify cookie
+            resp = await self.client.user_info(async_=True)
+            if resp.get("state"):
+                self.is_connected = True
+                logger.info("✅ 115 网盘登录验证成功")
+                return True
+        except Exception as e:
+            logger.error(f"❌ 115 网盘登录验证失败: {e}")
+            self.is_connected = False
+            return False
+            
+        self.is_connected = False
+        return False
 
     async def _ensure_save_dir(self):
         """Ensure the save directory exists and return its CID"""

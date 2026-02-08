@@ -1,6 +1,7 @@
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.client.session.aiohttp import AiohttpSession
+from aiohttp_socks import ProxyConnector
 from app.core.config import settings
 from app.services.p115 import p115_service
 from loguru import logger
@@ -12,25 +13,89 @@ class TGService:
         self.bot = None
         self.dp = None
         self.polling_task = None
+        self.is_connected = False
+        self._lock = asyncio.Lock()
+        self._current_polling_id = 0
+        self._verify_tasks = []
         if settings.TG_BOT_TOKEN:
             self.init_bot(settings.TG_BOT_TOKEN)
 
     def init_bot(self, token: str):
+        """Synchronous initialization for startup or immediate use. 
+        Note: For clean restarts, use restart_polling instead."""
         try:
             # Configure proxy if set
             session = None
-            if settings.HTTP_PROXY or settings.HTTPS_PROXY:
-                proxy = settings.HTTPS_PROXY or settings.HTTP_PROXY
-                session = AiohttpSession(proxy=proxy)
-                logger.info(f"Telegram Bot using proxy: {proxy}")
+            if settings.PROXY_ENABLED and settings.PROXY_HOST and settings.PROXY_PORT:
+                proxy_type = settings.PROXY_TYPE.lower()
+                auth = f"{settings.PROXY_USER}:{settings.PROXY_PASS}@" if settings.PROXY_USER and settings.PROXY_PASS else ""
+                proxy_url = f"{proxy_type}://{auth}{settings.PROXY_HOST}:{settings.PROXY_PORT}"
+                session = AiohttpSession(proxy=proxy_url)
+                logger.info(f"Telegram Bot using {settings.PROXY_TYPE} proxy: {settings.PROXY_HOST}:{settings.PROXY_PORT}")
                 
             self.bot = Bot(token=token, session=session)
             self.dp = Dispatcher()
             self._register_handlers()
             logger.info("Telegram Bot initialized successfully")
+            
+            # Verify connection asynchronously and track the task
+            v_task = asyncio.create_task(self.verify_connection())
+            self._verify_tasks.append(v_task)
+            # Cleanup finished verify tasks
+            v_task.add_done_callback(lambda t: self._verify_tasks.remove(t) if t in self._verify_tasks else None)
         except Exception as e:
+            import traceback
             logger.error(f"Failed to initialize Telegram Bot: {e}")
+            logger.error(traceback.format_exc())
             self.bot = None
+            self.is_connected = False
+
+    async def _cleanup_bot(self, bot_instance=None):
+        """Thoroughly clean up specified or current bot instance and its session"""
+        target_bot = bot_instance or self.bot
+        if target_bot:
+            try:
+                # Log with safe ID access (bot.id is an int)
+                bot_id_str = str(getattr(target_bot, 'id', 'unknown'))
+                logger.debug(f"Cleaning up bot instance (ID: {bot_id_str[:5]}...)")
+                
+                # 0. Cancel all pending verify tasks
+                for vt in self._verify_tasks[:]:
+                    if not vt.done():
+                        vt.cancel()
+                self._verify_tasks.clear()
+                
+                # 1. Try to delete webhook as a safety measure to stop delivery
+                try:
+                    # Increase timeout for better reliability
+                    await asyncio.wait_for(target_bot.delete_webhook(drop_pending_updates=True), timeout=5.0)
+                    logger.debug("Bot webhook deleted and pending updates dropped")
+                except asyncio.TimeoutError:
+                    logger.debug("Webhook deletion timeout - continuing cleanup")
+                except Exception as ex:
+                    logger.debug(f"Non-critical: Could not delete webhook: {ex}")
+
+                # 2. Try to send getMe to clear any pending connections
+                try:
+                    await asyncio.wait_for(target_bot.close(), timeout=3.0)
+                    logger.debug("Bot connection closed")
+                except Exception as ex:
+                    logger.debug(f"Bot close error (non-critical): {ex}")
+
+                # 3. Close session
+                if hasattr(target_bot, 'session') and target_bot.session:
+                    try:
+                        await target_bot.session.close()
+                        logger.debug("Bot session closed successfully")
+                    except Exception as ex:
+                        logger.debug(f"Session close error: {ex}")
+            except Exception as e:
+                logger.error(f"Error during bot session closure: {e}")
+            finally:
+                if not bot_instance: # Only clear class variables if cleaning current bot
+                    self.bot = None
+                    self.dp = None
+                    self.is_connected = False
 
     def _get_allowed_chats(self):
         if not settings.TG_ALLOW_CHATS:
@@ -626,27 +691,102 @@ class TGService:
         mock_msg = MockMessage(self.bot, user_id)
         await self.poll_pending_link(mock_msg, pending_info)
 
+    async def verify_connection(self) -> bool:
+        """Verify the bot token connection with Telegram"""
+        if not self.bot:
+            self.is_connected = False
+            return False
+            
+        try:
+            me = await self.bot.get_me()
+            if me:
+                self.is_connected = True
+                logger.info(f"✅ Telegram Bot 连接验证成功: @{me.username}")
+                return True
+        except Exception as e:
+            err_msg = str(e)
+            if any(x in err_msg for x in ["ProxyConnectionError", "Timeout", "Cannot connect", "远程计算机拒绝"]):
+                logger.warning(f"⚠️ Telegram Bot 连接验证未通过 (网络/代理问题): {err_msg}")
+            else:
+                logger.error(f"❌ Telegram Bot 连接验证失败: {e}")
+            self.is_connected = False
+            return False
+        
+        self.is_connected = False
+        return False
+
     async def start_polling(self):
         if self.dp and self.bot:
-            logger.info("Starting Telegram Bot polling...")
-            await self.dp.start_polling(self.bot)
+            self._current_polling_id += 1
+            p_id = self._current_polling_id
+            try:
+                logger.info(f"Starting Telegram Bot polling (ID: {p_id})...")
+                # Using skip_updates=True to avoid processing old messages after restart
+                await self.dp.start_polling(self.bot, skip_updates=True, handle_signals=False)
+            except asyncio.CancelledError:
+                logger.info(f"✅ Telegram Bot polling (ID: {p_id}) was cancelled")
+                raise
+            except Exception as e:
+                err_msg = str(e)
+                # Filter out verbose stack traces for common network/proxy issues
+                if any(x in err_msg for x in ["ProxyConnectionError", "Timeout", "Cannot connect", "远程计算机拒绝"]):
+                    logger.warning(f"⚠️ Telegram Bot 轮询 (ID: {p_id}) 因网络/代理连接问题中断: {err_msg}")
+                else:
+                    logger.error(f"❌ Telegram Bot 轮询 (ID: {p_id}) 发生意外错误: {e}")
+                    import traceback
+                    logger.debug(traceback.format_exc())
+            finally:
+                logger.debug(f"Polling task (ID: {p_id}) ended")
 
     async def stop_polling(self):
-        """Stop current polling task"""
+        """Stop current polling task and ensure dispatcher stops"""
         if self.polling_task and not self.polling_task.done():
+            logger.debug("Cancelling polling task...")
             self.polling_task.cancel()
             try:
                 await self.polling_task
             except asyncio.CancelledError:
                 logger.info("✅ Telegram Bot polling stopped")
+            except Exception as e:
+                logger.debug(f"Error while stopping polling: {e}")
             self.polling_task = None
+        
+        # Ensure dispatcher stops as well
+        if self.dp:
+            try:
+                await self.dp.stop_polling()
+                logger.debug("Dispatcher polling stopped")
+            except Exception as e:
+                logger.debug(f"Dispatcher stop error (non-critical): {e}")
 
     async def restart_polling(self):
-        """Restart polling with updated configuration"""
-        await self.stop_polling()
-        if self.bot and self.dp:
-            self.polling_task = asyncio.create_task(self.start_polling())
-            logger.info("🔄 Telegram Bot polling restarted")
+        """Restart polling with updated configuration, ensuring no conflicts"""
+        async with self._lock:
+            logger.info("🔄 Telegram Bot 正在尝试安全重启...")
+            
+            # 1. Stop current polling task
+            await self.stop_polling()
+            
+            # 2. Cleanup session and remove old bot instance
+            await self._cleanup_bot()
+            
+            # 3. Wait longer for Telegram server to fully register disconnection
+            # This is crucial to avoid "getUpdates conflict" errors
+            logger.debug("Waiting for Telegram server to process disconnection...")
+            await asyncio.sleep(5)
+            
+            # 4. Initialize new bot with current settings
+            if settings.TG_BOT_TOKEN:
+                self.init_bot(settings.TG_BOT_TOKEN)
+                if self.bot and self.dp:
+                    # Add small delay before starting polling
+                    await asyncio.sleep(1)
+                    self.polling_task = asyncio.create_task(self.start_polling())
+                    logger.info("✅ Telegram Bot 轮询已重启，运行正常")
+                else:
+                    logger.error("❌ Telegram Bot 重新初始化失败")
+            else:
+                logger.warning("⚠️ 未配置 Bot Token，跳过启动")
 
     async def test_send_to_user(self):
         if not self.bot or not settings.TG_USER_ID:
@@ -655,10 +795,15 @@ class TGService:
         try:
             await self.bot.send_message(settings.TG_USER_ID, "🔔 P115-Share 机器人测试通知成功！")
             logger.info(f"✅ 已向用户 {settings.TG_USER_ID} 发送测试消息")
+            self.is_connected = True # Test success implies connected
             return True, "测试消息已模拟发送"
         except Exception as e:
             logger.error(f"❌ 向用户发送测试消息失败: {e}")
-            return False, str(e)
+            self.is_connected = False # Test failed potentially implies connection issue
+            err_msg = str(e)
+            if "Timeout" in err_msg or "ConnectorError" in err_msg or "信号灯超时时间已到" in err_msg or "Cannot connect to host" in err_msg:
+                return False, "测试连接失败，请检查网络环境"
+            return False, err_msg
 
     async def test_send_to_channel(self):
         if not self.bot or not settings.TG_CHANNEL_ID:
@@ -670,6 +815,9 @@ class TGService:
             return True, "测试消息已模拟发送"
         except Exception as e:
             logger.error(f"❌ 向频道发送测试消息失败: {e}")
-            return False, str(e)
+            err_msg = str(e)
+            if "Timeout" in err_msg or "ConnectorError" in err_msg or "信号灯超时时间已到" in err_msg or "Cannot connect to host" in err_msg:
+                return False, "测试连接失败，请检查网络环境"
+            return False, err_msg
 
 tg_service = TGService()

@@ -9,12 +9,16 @@
       </a-col>
       <a-col :xs="24" :sm="12" :md="9">
         <a-card title="TG 机器人" :bordered="false" size="small">
-          <a-tag :color="tgStatus ? 'blue' : 'red'">{{ tgStatus ? '已连接' : '未配置' }}</a-tag>
+          <a-tag :color="tgStatus ? 'blue' : (tgToken ? 'red' : 'default')">
+            {{ tgStatus ? '已连接' : (tgToken ? '连接失败' : '未配置') }}
+          </a-tag>
         </a-card>
       </a-col>
       <a-col :xs="24" :sm="12" :md="9">
         <a-card title="115 网盘" :bordered="false" size="small">
-          <a-tag :color="p115Status ? 'blue' : 'red'">{{ p115Status ? '已登录' : '未登录' }}</a-tag>
+          <a-tag :color="p115Status ? 'blue' : (p115Cookie ? 'red' : 'default')">
+            {{ p115Status ? '已登录' : (p115Cookie ? '登录失效' : '未登录') }}
+          </a-tag>
         </a-card>
       </a-col>
     </a-row>
@@ -42,6 +46,8 @@ import { message, Modal } from 'ant-design-vue';
 
 const tgStatus = ref(false);
 const p115Status = ref(false);
+const tgToken = ref('');
+const p115Cookie = ref('');
 const version = ref('');
 
 const checkStatus = async () => {
@@ -50,6 +56,8 @@ const checkStatus = async () => {
     // Map to real connection status
     tgStatus.value = !!res.data.tg_bot_connected;
     p115Status.value = !!res.data.p115_logged_in;
+    tgToken.value = res.data.tg_bot_token || '';
+    p115Cookie.value = res.data.p115_cookie || '';
     version.value = res.data.version || '';
     message.success('状态已刷新');
   } catch (e) {
@@ -69,6 +77,8 @@ const handleTestBot = async () => {
     }
   } catch (e) {
     message.error('测试请求失败');
+  } finally {
+    await checkStatus();
   }
 };
 
@@ -82,6 +92,8 @@ const handleTestChannel = async () => {
     }
   } catch (e) {
     message.error('测试请求失败');
+  } finally {
+    await checkStatus();
   }
 };
 

@@ -24,6 +24,9 @@
           <a-form-item label="Chat ID 白名单" name="tg_allow_chats">
             <a-input v-model:value="formState.tg_allow_chats" placeholder="允许使用机器人的 ID (多个用逗号分隔)" />
           </a-form-item>
+          
+          <a-divider />
+          <a-button type="primary" @click="onFinish" :loading="loading" block>保存 Telegram 配置</a-button>
         </a-collapse-panel>
 
         <a-collapse-panel key="p115" header="115 网盘配置">
@@ -44,33 +47,83 @@
           <a-form-item label="回收站密码" name="p115_recycle_password">
             <a-input-password v-model:value="formState.p115_recycle_password" placeholder="留空则无密码" />
           </a-form-item>
+          
+          <a-divider />
+          <a-button type="primary" @click="onFinish" :loading="loading" block>保存 115 配置</a-button>
         </a-collapse-panel>
 
-        <a-collapse-panel key="proxy" header="代理配置（可选）">
-          <a-form-item label="HTTP Proxy" name="http_proxy">
-            <a-input v-model:value="formState.http_proxy" placeholder="例如 http://192.168.0.12:7890" />
-            <div style="font-size: 12px; color: #999; margin-top: 4px">支持带认证：http://user:pass@host:port</div>
+        <a-collapse-panel key="proxy" header="代理配置">
+          <a-form-item label="启用代理" style="margin-bottom: 16px">
+            <a-switch v-model:checked="formState.proxy_enabled" />
           </a-form-item>
-          <a-form-item label="HTTPS Proxy" name="https_proxy">
-            <a-input v-model:value="formState.https_proxy" placeholder="例如 http://192.168.0.12:7890" />
-            <div style="font-size: 12px; color: #999; margin-top: 4px">支持带认证：http://user:pass@host:port</div>
-          </a-form-item>
+          
+          <div :style="{ opacity: formState.proxy_enabled ? 1 : 0.5, transition: 'all 0.3s', pointerEvents: formState.proxy_enabled ? 'auto' : 'none' }">
+            <a-row :gutter="16">
+              <a-col :span="16">
+                <a-form-item label="代理地址" name="proxy_host">
+                  <a-input v-model:value="formState.proxy_host" placeholder="例如 192.168.100.218 或 127.0.0.1" />
+                </a-form-item>
+              </a-col>
+              <a-col :span="8">
+                <a-form-item label="代理端口" name="proxy_port">
+                  <a-input v-model:value="formState.proxy_port" placeholder="例如 7890" />
+                </a-form-item>
+              </a-col>
+            </a-row>
+
+            <a-row :gutter="16">
+              <a-col :span="12">
+                <a-form-item label="用户名 (可选)" name="proxy_user">
+                  <a-input v-model:value="formState.proxy_user" placeholder="代理用户名" />
+                </a-form-item>
+              </a-col>
+              <a-col :span="12">
+                <a-form-item label="密码 (可选)" name="proxy_pass">
+                  <a-input-password v-model:value="formState.proxy_pass" placeholder="代理密码" />
+                </a-form-item>
+              </a-col>
+            </a-row>
+
+            <a-row :gutter="16">
+              <a-col :span="14">
+                <a-form-item label="协议类型" name="proxy_type" style="margin-bottom: 0">
+                  <a-select v-model:value="formState.proxy_type">
+                    <a-select-option value="HTTP">HTTP</a-select-option>
+                    <a-select-option value="SOCKS5">SOCKS5</a-select-option>
+                  </a-select>
+                </a-form-item>
+              </a-col>
+              <a-col :span="10">
+                <div style="height: 32px"></div> <!-- 占位符，对齐 label 空间 -->
+                <a-button @click="detectProtocol" :loading="detecting" block shadow="false">
+                  <template #icon><SearchOutlined /></template>
+                  自动检测协议
+                </a-button>
+              </a-col>
+            </a-row>
+
+            <div style="margin-top: 24px; display: flex; gap: 8px">
+              <a-button @click="testProxy" :loading="testingProxy">测试代理连接</a-button>
+            </div>
+          </div>
+          
+          <a-divider />
+          <a-button type="primary" @click="onFinish" :loading="loading" block>保存代理配置</a-button>
         </a-collapse-panel>
       </a-collapse>
-
-      <a-form-item style="margin-top: 24px">
-        <a-button type="primary" html-type="submit" :loading="loading" block>保存配置</a-button>
-      </a-form-item>
     </a-form>
   </div>
 </template>
 
 <script setup lang="ts">
-import { reactive, ref, onMounted } from 'vue';
+import { reactive, ref, onMounted, computed } from 'vue';
 import axios from 'axios';
 import { message } from 'ant-design-vue';
+import { SearchOutlined } from '@ant-design/icons-vue';
 
 const loading = ref(false);
+const testingProxy = ref(false);
+const detecting = ref(false);
 const formRef = ref();
 const formState = reactive({
   tg_bot_token: '',
@@ -82,8 +135,12 @@ const formState = reactive({
   p115_cleanup_dir_cron: '',
   p115_cleanup_trash_cron: '',
   p115_recycle_password: '',
-  http_proxy: '',
-  https_proxy: ''
+  proxy_enabled: false,
+  proxy_host: '',
+  proxy_port: '',
+  proxy_user: '',
+  proxy_pass: '',
+  proxy_type: 'HTTP'
 });
 
 const validateCron = (_rule: any, value: string) => {
@@ -96,7 +153,21 @@ const validateCron = (_rule: any, value: string) => {
   return Promise.reject('请输入有效的 Cron 表达式 (例如 */30 * * * *)');
 };
 
-const rules = {
+const validateProxyHost = (_rule: any, value: string) => {
+  if (formState.proxy_enabled && !value) {
+    return Promise.reject('启用代理时，代理地址不能为空');
+  }
+  return Promise.resolve();
+};
+
+const validateProxyPort = (_rule: any, value: string) => {
+  if (formState.proxy_enabled && !value) {
+    return Promise.reject('启用代理时，代理端口不能为空');
+  }
+  return Promise.resolve();
+};
+
+const rules = computed(() => ({
   tg_bot_token: [{ required: true, message: '请输入 Bot Token', trigger: 'blur' }],
   tg_channel_id: [{ required: true, message: '请输入 Channel ID', trigger: 'blur' }],
   tg_user_id: [{ required: true, message: '请输入 User ID', trigger: 'blur' }],
@@ -104,8 +175,10 @@ const rules = {
   p115_cookie: [{ required: true, message: '请输入 Cookie', trigger: 'blur' }],
   p115_save_dir: [{ required: true, message: '请输入保存路径', trigger: 'blur' }],
   p115_cleanup_dir_cron: [{ validator: validateCron, trigger: 'blur' }],
-  p115_cleanup_trash_cron: [{ validator: validateCron, trigger: 'blur' }]
-};
+  p115_cleanup_trash_cron: [{ validator: validateCron, trigger: 'blur' }],
+  proxy_host: [{ validator: validateProxyHost, trigger: 'change' }],
+  proxy_port: [{ validator: validateProxyPort, trigger: 'change' }]
+}));
 
 const loadConfig = async () => {
   try {
@@ -119,8 +192,12 @@ const loadConfig = async () => {
     formState.p115_cleanup_dir_cron = res.data.p115_cleanup_dir_cron || '';
     formState.p115_cleanup_trash_cron = res.data.p115_cleanup_trash_cron || '';
     formState.p115_recycle_password = res.data.p115_recycle_password || '';
-    formState.http_proxy = res.data.http_proxy || '';
-    formState.https_proxy = res.data.https_proxy || '';
+    formState.proxy_enabled = res.data.proxy_enabled || false;
+    formState.proxy_host = res.data.proxy_host || '';
+    formState.proxy_port = res.data.proxy_port || '';
+    formState.proxy_user = res.data.proxy_user || '';
+    formState.proxy_pass = res.data.proxy_pass || '';
+    formState.proxy_type = res.data.proxy_type || 'HTTP';
   } catch (e) {
     console.error(e);
   }
@@ -141,6 +218,43 @@ const onFinish = async () => {
     }
   } finally {
     loading.value = false;
+  }
+};
+
+const testProxy = async () => {
+  try {
+    testingProxy.value = true;
+    const res = await axios.post('/api/config/test-proxy', formState);
+    if (res.data.status === 'success') {
+      message.success(res.data.message);
+    } else {
+      message.error(res.data.message);
+    }
+  } catch (e: any) {
+    message.error(e.response?.data?.detail || '测试失败');
+  } finally {
+    testingProxy.value = false;
+  }
+};
+
+const detectProtocol = async () => {
+  if (!formState.proxy_host || !formState.proxy_port) {
+    message.warning('请先填写地址和端口');
+    return;
+  }
+  try {
+    detecting.value = true;
+    const res = await axios.post('/api/config/detect-proxy-protocol', formState);
+    if (res.data.status === 'success') {
+      formState.proxy_type = res.data.protocol;
+      message.success(res.data.message);
+    } else {
+      message.error(res.data.message);
+    }
+  } catch (e: any) {
+    message.error(e.response?.data?.detail || '检测失败');
+  } finally {
+    detecting.value = false;
   }
 };
 

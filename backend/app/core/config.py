@@ -28,6 +28,12 @@ class Settings(BaseSettings):
     P115_RECYCLE_PASSWORD: str = ""
     
     # Proxy settings
+    PROXY_ENABLED: bool = False
+    PROXY_HOST: str = ""
+    PROXY_PORT: str = ""
+    PROXY_USER: str = ""
+    PROXY_PASS: str = ""
+    PROXY_TYPE: str = "HTTP" # Options: HTTP, SOCKS5
     HTTP_PROXY: str = ""
     HTTPS_PROXY: str = ""
 
@@ -50,21 +56,26 @@ class Settings(BaseSettings):
                 session.add(admin)
                 logger.info("Default admin user created (admin/admin)")
             
-            # Check if we need to migrate from config.json
-            result = await session.execute(select(SystemSettings).limit(1))
-            if not result.scalar_one_or_none():
-                await self._init_default_settings(session)
-            else:
-                await self._load_from_db(session)
+            # Check if we need to migrate or add missing settings
+            await self._ensure_all_settings_exist(session)
+            await self._load_from_db(session)
             
             await session.commit()
 
-    async def _init_default_settings(self, session):
-        """Initialize settings with defaults from class attributes"""
-        logger.info("💾 Initializing default settings in database...")
+    async def _ensure_all_settings_exist(self, session):
+        """Ensure all fields defined in Settings exist in the system_settings table"""
+        result = await session.execute(select(SystemSettings.key))
+        existing_keys = set(result.scalars().all())
+        
+        added_count = 0
         for field in self.model_fields:
-            val = getattr(self, field)
-            session.add(SystemSettings(key=field, value=str(val)))
+            if field not in existing_keys:
+                val = getattr(self, field)
+                session.add(SystemSettings(key=field, value=str(val)))
+                added_count += 1
+        
+        if added_count > 0:
+            logger.info(f"💾 Added {added_count} missing settings to database.")
 
     async def _load_from_db(self, session):
         """Load settings from system_settings table"""
@@ -85,16 +96,20 @@ class Settings(BaseSettings):
                     logger.error(f"Failed to cast setting {row.key}: {e}")
 
     async def save_setting(self, key: str, value: str):
-        """Save a single setting to database"""
+        """Save a single setting to database (Create or Update)"""
         if not hasattr(self, key):
             return False
             
         async with async_session() as session:
-            await session.execute(
-                update(SystemSettings)
-                .where(SystemSettings.key == key)
-                .values(value=str(value))
-            )
+            # Check if key exists
+            result = await session.execute(select(SystemSettings).where(SystemSettings.key == key))
+            existing = result.scalar_one_or_none()
+            
+            if existing:
+                existing.value = str(value)
+            else:
+                session.add(SystemSettings(key=key, value=str(value)))
+                
             await session.commit()
             setattr(self, key, value)
             return True

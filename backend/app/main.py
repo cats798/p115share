@@ -15,8 +15,7 @@ from app.api.config import router as config_router
 from app.api.auth import router as auth_router
 from app.services.tg_bot import tg_service
 from app.services.p115 import p115_service
-
-VERSION = "1.0.8"
+from app.version import VERSION
 
 # Setup Loguru to capture standard logging
 class InterceptHandler(logging.Handler):
