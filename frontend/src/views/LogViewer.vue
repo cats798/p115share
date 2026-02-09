@@ -105,19 +105,19 @@ const parseLog = (data: string): LogEntry => {
   if (parts.length >= 4) {
     return {
       raw: data,
-      time: parts[0],
-      level: parts[1],
-      source: parts[2],
+      time: parts[0] || '-',
+      level: parts[1] || 'INFO',
+      source: parts[2] || '-',
       message: parts.slice(3).join(' | ')
     };
   } else if (parts.length === 3) {
     // Handling legacy 3-part format: Time | Level | Message
     return {
       raw: data,
-      time: parts[0],
-      level: parts[1],
+      time: parts[0] || '-',
+      level: parts[1] || 'INFO',
       source: '-',
-      message: parts[2]
+      message: parts[2] || ''
     };
   }
   // Fallback for non-standard logs
@@ -170,7 +170,7 @@ const scrollToBottom = async () => {
   }
 };
 
-const handleScroll = (e: Event) => {
+const handleScroll = () => {
   // Manual scroll no longer auto-disables the switch to avoid confusion
   // Unless we want the "smart" behavior, but user wants literal switch control
 };
