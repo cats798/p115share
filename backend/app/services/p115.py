@@ -228,7 +228,7 @@ class P115Service:
                         "message": "链接已过期"
                     }
 
-                if have_vio_file == 1 or "***" in share_title:
+                if have_vio_file == 1:
                     logger.warning(f"🚫 分享链接包含违规内容: {share_url}")
                     return {
                         "status": "error",
@@ -381,7 +381,7 @@ class P115Service:
                 "share_state": share_state,
                 "is_auditing": share_state == 0,
                 "is_expired": share_state == 7,
-                "is_prohibited": have_vio_file == 1 or "***" in share_title,
+                "is_prohibited": have_vio_file == 1,
                 "title": share_title
             }
             logger.debug(f"📊 检查链接状态: {share_url} -> {res}")
