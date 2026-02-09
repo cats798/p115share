@@ -18,6 +18,7 @@ class P115Service:
         self.is_connected = False
         self._task_lock: Optional[asyncio.Lock] = None  # Lazy initialize
         self._current_task: str | None = None  # Track current task type
+        self._save_dir_cid: int = 0  # Cached save directory CID
         if settings.P115_COOKIE:
             self.init_client(settings.P115_COOKIE)
 
@@ -52,27 +53,32 @@ class P115Service:
 
     @asynccontextmanager
     async def _acquire_task_lock(self, task_type: Literal["save_share", "cleanup"]):
-        """Acquire task lock with waiting logic"""
+        """Acquire task lock with timeout.
+        
+        Uses asyncio.wait_for on the actual lock acquisition instead of
+        polling, which is both more efficient and avoids race conditions.
+        """
         if self._task_lock is None:
             self._task_lock = asyncio.Lock()
             
-        max_wait = 300  # 5 minutes max wait
-        start_time = time.time()
+        max_wait = 2100  # 35 minutes max wait (to accommodate network retry)
         
-        while self._task_lock.locked():
-            if time.time() - start_time > max_wait:
-                raise TimeoutError(f"等待任务锁超时: {task_type}")
+        if self._task_lock.locked():
             logger.info(f"⏳ {task_type} 任务等待中，当前任务: {self._current_task}")
-            await asyncio.sleep(5)
         
-        async with self._task_lock:
-            self._current_task = task_type
-            logger.info(f"🔒 {task_type} 任务已获取锁")
-            try:
-                yield
-            finally:
-                self._current_task = None
-                logger.info(f"🔓 {task_type} 任务已释放锁")
+        try:
+            await asyncio.wait_for(self._task_lock.acquire(), timeout=max_wait)
+        except asyncio.TimeoutError:
+            raise TimeoutError(f"等待任务锁超时 ({max_wait}s): {task_type}，当前占用: {self._current_task}")
+        
+        self._current_task = task_type
+        logger.info(f"🔒 {task_type} 任务已获取锁")
+        try:
+            yield
+        finally:
+            self._current_task = None
+            self._task_lock.release()
+            logger.info(f"🔓 {task_type} 任务已释放锁")
 
     async def verify_connection(self) -> bool:
         """Verify the 115 cookie connection"""
@@ -95,47 +101,76 @@ class P115Service:
         self.is_connected = False
         return False
 
+    def clear_save_dir_cache(self):
+        """Clear the cached save directory CID (e.g. after cleanup)"""
+        self._save_dir_cid = 0
+        logger.debug("🗑️ 已清除保存目录 CID 缓存")
+
     async def _ensure_save_dir(self):
-        """Ensure the save directory exists and return its CID"""
+        """Ensure the save directory exists and return its CID.
+        
+        Uses a cached CID to avoid repeated API calls. If the cached CID
+        is valid, return it directly. On failure, raises an exception
+        instead of returning 0 to prevent saving to root directory.
+        """
         path = settings.P115_SAVE_DIR or "/分享保存"
+        
+        # Return cached CID if available
+        if self._save_dir_cid > 0:
+            logger.debug(f"📂 使用缓存的保存目录 CID: {self._save_dir_cid}")
+            return self._save_dir_cid
+        
         logger.info(f"🔍 开始检查/创建保存目录: {path}")
         
         if not self.client:
-            logger.warning("⚠️ Client not initialized")
-            return 0
+            raise RuntimeError("P115Client 未初始化，无法创建保存目录")
         
-        try:
-            # fs_makedirs_app creates the directory if it doesn't exist
-            # and returns the final directory's info
-            logger.info(f"📁 调用 fs_makedirs_app 创建目录...")
-            resp = await self.client.fs_makedirs_app(path, pid=0, async_=True)
-            logger.info(f"📋 fs_makedirs_app 响应: {resp}")
-            check_response(resp)
+        # Retry up to 3 times with timeout
+        last_error = None
+        for attempt in range(1, 4):
+            try:
+                logger.info(f"📁 调用 fs_makedirs_app 创建目录... (尝试 {attempt}/3)")
+                # Add 30s timeout to prevent indefinite hanging
+                resp = await asyncio.wait_for(
+                    self.client.fs_makedirs_app(path, pid=0, async_=True),
+                    timeout=30
+                )
+                logger.info(f"📋 fs_makedirs_app 响应: {resp}")
+                check_response(resp)
+                
+                # The response structure has 'cid' at the top level (not in 'data')
+                # Response format: {'state': True, 'error': '', 'errCode': 0, 'cid': '3358575817564146054'}
+                cid = 0
+                if "cid" in resp:
+                    cid = int(resp["cid"])
+                    logger.info(f"🔢 从响应中提取到 CID: {cid}")
+                elif "data" in resp:
+                    data = resp["data"]
+                    cid = int(data.get("category_id") or data.get("cid") or data.get("id") or 0)
+                    logger.info(f"🔢 从 data 字段中提取到 CID: {cid}")
+                else:
+                    logger.error(f"❌ 响应中没有 'cid' 或 'data' 字段: {resp}")
+                    
+                if cid == 0:
+                    raise RuntimeError(f"无法从响应获取有效的 CID: {resp}")
+                    
+                # Cache the CID for future use
+                self._save_dir_cid = cid
+                logger.info(f"✅ 保存目录已确认: {path} (CID: {cid})")
+                return cid
+                
+            except asyncio.TimeoutError:
+                last_error = TimeoutError(f"fs_makedirs_app 请求超时 (30s), 尝试 {attempt}/3")
+                logger.warning(f"⏱️ fs_makedirs_app 请求超时 (尝试 {attempt}/3)")
+            except Exception as e:
+                last_error = e
+                logger.warning(f"⚠️ 创建目录失败 (尝试 {attempt}/3): {e}")
             
-            # The response structure has 'cid' at the top level (not in 'data')
-            # Response format: {'state': True, 'error': '', 'errCode': 0, 'cid': '3358575817564146054'}
-            cid = 0
-            if "cid" in resp:
-                # CID is returned as a string, convert to int
-                cid = int(resp["cid"])
-                logger.info(f"🔢 从响应中提取到 CID: {cid}")
-            elif "data" in resp:
-                # Fallback: check if it's in a 'data' field (for compatibility)
-                data = resp["data"]
-                cid = int(data.get("category_id") or data.get("cid") or data.get("id") or 0)
-                logger.info(f"🔢 从 data 字段中提取到 CID: {cid}")
-            else:
-                logger.error(f"❌ 响应中没有 'cid' 或 'data' 字段: {resp}")
-                
-            if cid == 0:
-                logger.error(f"❌ 无法从响应获取有效的 CID: {resp}")
-                return 0
-                
-            logger.info(f"✅ 保存目录已确认: {path} (CID: {cid})")
-            return cid
-        except Exception as e:
-            logger.error(f"❌ 无法确保保存目录 {path} 存在: {e}", exc_info=True)
-            return 0
+            if attempt < 3:
+                await asyncio.sleep(3)
+        
+        # All retries exhausted — raise to prevent saving to root
+        raise RuntimeError(f"无法确保保存目录 {path} 存在 (已重试3次): {last_error}")
 
     async def save_share_link(self, share_url: str, metadata: dict = None):
         """Save a 115 share link to the configured directory
@@ -229,8 +264,39 @@ class P115Service:
                 
                 logger.info(f"📦 检测到 {len(fids)} 个项目: {', '.join(names[:3])}{'...' if len(names) > 3 else ''}")
                 
-                # 3. Ensure save directory
-                to_cid = await self._ensure_save_dir()
+                # 3. Ensure save directory (with network recovery retry)
+                #    If _ensure_save_dir fails (e.g. network issue), pause and retry
+                #    for up to 30 minutes instead of discarding the task.
+                to_cid = None
+                max_network_wait = 1800  # 30 minutes
+                network_start = time.time()
+                network_attempt = 0
+                
+                while True:
+                    try:
+                        to_cid = await self._ensure_save_dir()
+                        if network_attempt > 0:
+                            logger.info(f"🎉 网络已恢复，继续处理任务 (等待了 {time.time() - network_start:.0f}s)")
+                        break
+                    except Exception as dir_err:
+                        network_attempt += 1
+                        elapsed = time.time() - network_start
+                        remaining = max_network_wait - elapsed
+                        
+                        if remaining <= 0:
+                            logger.error(f"❌ 网盘网络恢复等待超时 (30分钟)，中止任务: {dir_err}")
+                            return {
+                                "status": "error",
+                                "error_type": "dir_failed",
+                                "message": f"网盘网络持续不可用 (已等待30分钟): {dir_err}"
+                            }
+                        
+                        wait_time = min(30, remaining)
+                        logger.warning(
+                            f"⏸️ 网盘网络异常，任务暂停等待恢复 "
+                            f"(第{network_attempt}次重试, 已等待 {elapsed:.0f}s, 剩余 {remaining:.0f}s): {dir_err}"
+                        )
+                        await asyncio.sleep(wait_time)
                 
                 # 4. Receive files
                 receive_payload = {
@@ -560,6 +626,8 @@ class P115Service:
                 if not save_dir_cid:
                     logger.error("无法获取保存目录 CID")
                     return False
+                # Clear cache since we're deleting the directory
+                self.clear_save_dir_cache()
 
                 # 直接删除整个保存目录文件夹
                 save_path = settings.P115_SAVE_DIR or "/分享保存"

@@ -111,9 +111,6 @@
           <Settings v-if="currentView === 'settings'" />
         </div>
       </a-layout-content>
-      <a-layout-footer style="text-align: center; padding: 16px">
-        P115-Share ©2026 Created by Listening
-      </a-layout-footer>
     </a-layout>
 
     <!-- Profile Modal -->
