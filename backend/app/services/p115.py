@@ -200,6 +200,15 @@ class P115Service:
                 share_title = share_info.get("share_title", "")
                 have_vio_file = share_info.get("have_vio_file", 0)
 
+                # 优先判断违规内容，无论审核状态如何
+                if have_vio_file == 1:
+                    logger.warning(f"🚫 分享链接包含违规内容: {share_url}")
+                    return {
+                        "status": "error",
+                        "error_type": "violated",
+                        "message": "链接包含违规内容"
+                    }
+
                 if share_state == 0:
                     logger.info(f"🔍 分享链接处于审核中，进入轮询等待队列: {share_url}")
                     # Save to DB for persistence
@@ -226,14 +235,6 @@ class P115Service:
                         "status": "error",
                         "error_type": "expired",
                         "message": "链接已过期"
-                    }
-
-                if have_vio_file == 1:
-                    logger.warning(f"🚫 分享链接包含违规内容: {share_url}")
-                    return {
-                        "status": "error",
-                        "error_type": "violated",
-                        "message": "链接包含违规内容"
                     }
                 
                 if share_state != 1:
