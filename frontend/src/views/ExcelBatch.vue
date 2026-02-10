@@ -9,8 +9,8 @@
               <template #icon><FileExcelOutlined /></template>
             </a-avatar>
             <div class="header-text">
-              <h1>Excel批量转存</h1>
-              <p>上传包含分享链接的Excel文件，批量转存到云盘</p>
+              <h1>Excel批量转存分享</h1>
+              <p>上传包含分享链接的Excel文件，批量转存并同步分享链接</p>
             </div>
           </div>
           <div class="header-right">
@@ -46,7 +46,7 @@
                   <FileExcelOutlined style="color: #27ae60; font-size: 64px" />
                 </p>
                 <h2 class="ant-upload-text">请选择或上传一个任务</h2>
-                <p class="ant-upload-hint">上传包含分享链接的Excel文件，批量转存到云盘</p>
+                <p class="ant-upload-hint">上传包含分享链接的Excel文件，批量转存并同步分享链接</p>
                 <a-button type="primary" size="large" style="margin-top: 24px">
                   <template #icon><UploadOutlined /></template>
                   上传Excel文件
@@ -170,7 +170,7 @@
 
           <!-- Control Section -->
           <div class="control-panel">
-            <div class="section-title"><SettingOutlined /> 转存配置</div>
+            <div class="section-title"><SettingOutlined /> 转存分享配置</div>
             <div class="control-form">
                <div class="form-row">
                   <div class="form-item disabled">
@@ -196,15 +196,16 @@
                       v-if="currentTask?.status === 'wait' || currentTask?.status === 'paused' || currentTask?.status === 'cancelled'" 
                       type="primary" 
                       @click="handleStartTask" 
+                      :disabled="selectedRowKeys.length === 0"
                     >
-                      开始转存
+                      开始转存分享
                     </a-button>
                     <a-button v-if="currentTask?.status === 'running'" type="primary" @click="handlePauseTask">
-                      暂停转存
+                      暂停转存分享
                     </a-button>
                     <!-- User mentioned "暂停/继续、取消" -->
                     <a-button v-if="currentTask?.status === 'running' || currentTask?.status === 'paused'" @click="handleCancelTask">
-                      取消转存
+                      取消转存分享
                     </a-button>
                   </a-space>
                </div>
@@ -381,6 +382,8 @@ const pagination = reactive({
   current: 1,
   pageSize: 50,
   total: 0,
+  showSizeChanger: true,
+  pageSizeOptions: ['10', '20', '50', '100'],
 });
 
 const filterStatus = ref<string | undefined>(undefined);
@@ -516,8 +519,10 @@ const handleMappingOk = async () => {
 const handleStartTask = async () => {
   if (!currentTaskId.value) return;
   try {
-    await axios.post(`/api/excel/tasks/${currentTaskId.value}/start`);
-    message.success('正在启动转存...');
+    await axios.post(`/api/excel/tasks/${currentTaskId.value}/start`, {
+      item_ids: selectedRowKeys.value
+    });
+    message.success('正在启动转存分享...');
     await fetchTasks();
   } catch (e) {
     message.error('启动失败');

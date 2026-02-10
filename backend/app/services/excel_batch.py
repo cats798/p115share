@@ -215,12 +215,30 @@ class ExcelBatchService:
             )
             await session.commit()
 
-    async def start_task(self, task_id: int):
+    async def start_task(self, task_id: int, item_ids: list = None):
         async with async_session() as session:
+            if item_ids:
+                # 将选中的项设为待处理
+                await session.execute(
+                    update(ExcelTaskItem).where(
+                        ExcelTaskItem.task_id == task_id,
+                        ExcelTaskItem.id.in_(item_ids)
+                    ).values(status="待处理")
+                )
+                # 将其他原本待处理的项设为跳过
+                await session.execute(
+                    update(ExcelTaskItem).where(
+                        ExcelTaskItem.task_id == task_id,
+                        ExcelTaskItem.id.notin_(item_ids),
+                        ExcelTaskItem.status == "待处理"
+                    ).values(status="跳过")
+                )
+            
             await session.execute(
                 update(ExcelTask).where(ExcelTask.id == task_id).values(status="running")
             )
             await session.commit()
+        await self._update_task_counts(task_id)
         await self.start_worker()
 
     async def pause_task(self, task_id: int):
