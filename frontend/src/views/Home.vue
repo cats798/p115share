@@ -20,6 +20,10 @@
           <template #icon><ContainerOutlined /></template>
           <span>实时日志</span>
         </a-menu-item>
+        <a-menu-item key="excel" @click="currentView = 'excel'">
+          <template #icon><FileExcelOutlined /></template>
+          <span>Excel批量转存</span>
+        </a-menu-item>
         <a-menu-item key="settings" @click="currentView = 'settings'">
           <template #icon><SettingOutlined /></template>
           <span>系统配置</span>
@@ -48,6 +52,10 @@
         <a-menu-item key="logs" @click="currentView = 'logs'">
           <template #icon><ContainerOutlined /></template>
           <span>实时日志</span>
+        </a-menu-item>
+        <a-menu-item key="excel" @click="currentView = 'excel'">
+          <template #icon><FileExcelOutlined /></template>
+          <span>Excel批量转存</span>
         </a-menu-item>
         <a-menu-item key="settings" @click="currentView = 'settings'">
           <template #icon><SettingOutlined /></template>
@@ -107,6 +115,7 @@
       <a-layout-content :style="{ margin: isMobile ? '8px' : '16px' }">
         <div :style="{ padding: isMobile ? '16px' : '24px', background: antdToken.colorBgContainer, minHeight: '360px', borderRadius: '4px' }">
           <Dashboard v-if="currentView === 'dashboard'" />
+          <ExcelBatch v-if="currentView === 'excel'" />
           <LogViewer v-if="currentView === 'logs'" />
           <Settings v-if="currentView === 'settings'" />
         </div>
@@ -157,10 +166,12 @@ import {
   LogoutOutlined,
   PlusOutlined,
   LoadingOutlined,
-  BulbOutlined
+  BulbOutlined,
+  FileExcelOutlined
 } from '@ant-design/icons-vue';
 import { Grid, message, theme } from 'ant-design-vue';
 import Dashboard from './Dashboard.vue';
+import ExcelBatch from './ExcelBatch.vue';
 import LogViewer from './LogViewer.vue';
 import Settings from './Settings.vue';
 import { useAuthStore } from '../stores/auth';

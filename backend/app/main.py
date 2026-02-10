@@ -13,6 +13,7 @@ from loguru import logger
 from app.core.config import settings
 from app.api.config import router as config_router
 from app.api.auth import router as auth_router
+from app.api.excel import router as excel_router
 from app.services.tg_bot import tg_service
 from app.services.p115 import p115_service
 from app.version import VERSION
@@ -106,6 +107,10 @@ async def lifespan(app: FastAPI):
     from app.services.scheduler import cleanup_scheduler
     cleanup_scheduler.start()
     
+    # Start Excel Batch worker
+    from app.services.excel_batch import excel_batch_service
+    await excel_batch_service.start_worker()
+    
     yield
     
     # Shutdown
@@ -130,6 +135,7 @@ app.add_middleware(
 # Include API routers BEFORE catch-all route
 app.include_router(auth_router, prefix="/api")
 app.include_router(config_router, prefix="/api")
+app.include_router(excel_router, prefix="/api")
 
 # Mount static files separately (highest priority for /static)
 app.mount("/static", StaticFiles(directory="static"), name="static")

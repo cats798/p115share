@@ -11,6 +11,14 @@ from app.core.database import async_session
 from app.models.schema import PendingLink, LinkHistory
 from sqlalchemy import select, delete
 
+# 默认 API 请求超时（秒）
+API_TIMEOUT = 60
+# 默认 API 重试次数
+API_MAX_RETRIES = 3
+# 重试间隔（秒）
+API_RETRY_DELAY = 5
+
+
 class P115Service:
     def __init__(self):
         self.client = None
@@ -21,6 +29,48 @@ class P115Service:
         self._save_dir_cid: int = 0  # Cached save directory CID
         if settings.P115_COOKIE:
             self.init_client(settings.P115_COOKIE)
+
+    async def _api_call_with_timeout(
+        self,
+        coro_func,
+        *args,
+        timeout: int = API_TIMEOUT,
+        max_retries: int = API_MAX_RETRIES,
+        retry_delay: int = API_RETRY_DELAY,
+        label: str = "API",
+        **kwargs,
+    ):
+        """带超时和重试的 API 调用包装器。
+        
+        Args:
+            coro_func: 异步方法（如 self.client.share_snap）
+            *args: 传给 coro_func 的位置参数
+            timeout: 单次请求超时秒数
+            max_retries: 最大重试次数
+            retry_delay: 重试间隔秒数
+            label: 日志标识
+            **kwargs: 传给 coro_func 的关键字参数
+        """
+        last_error = None
+        for attempt in range(1, max_retries + 1):
+            try:
+                result = await asyncio.wait_for(
+                    coro_func(*args, **kwargs),
+                    timeout=timeout,
+                )
+                return result
+            except asyncio.TimeoutError:
+                last_error = TimeoutError(f"{label} 请求超时 ({timeout}s), 尝试 {attempt}/{max_retries}")
+                logger.warning(f"⏱️ {label} 请求超时 (尝试 {attempt}/{max_retries})")
+            except Exception as e:
+                # 非超时异常直接抛出，不重试
+                raise
+            
+            if attempt < max_retries:
+                logger.info(f"🔄 {label} 将在 {retry_delay}s 后重试...")
+                await asyncio.sleep(retry_delay)
+        
+        raise last_error
 
     def init_client(self, cookie: str):
         try:
@@ -88,7 +138,10 @@ class P115Service:
             
         try:
             # Simple API call to verify cookie
-            resp = await self.client.user_info(async_=True)
+            resp = await self._api_call_with_timeout(
+                self.client.user_info, async_=True,
+                timeout=30, max_retries=2, label="user_info"
+            )
             if resp.get("state"):
                 self.is_connected = True
                 logger.info("✅ 115 网盘登录验证成功")
@@ -189,8 +242,11 @@ class P115Service:
                 # 1. Extract share/receive codes
                 payload = share_extract_payload(share_url)
                 
-                # 2. Get share snapshot to get file IDs and names
-                snap_resp = await self.client.share_snap(payload, async_=True)
+                # 2. Get share snapshot to get file IDs and names (带超时重试)
+                snap_resp = await self._api_call_with_timeout(
+                    self.client.share_snap, payload, async_=True,
+                    timeout=API_TIMEOUT, label="share_snap"
+                )
                 check_response(snap_resp)
 
                 # Check for audit and violation status
@@ -308,7 +364,10 @@ class P115Service:
                 }
                 
                 try:
-                    recv_resp = await self.client.share_receive(receive_payload, async_=True)
+                    recv_resp = await self._api_call_with_timeout(
+                        self.client.share_receive, receive_payload, async_=True,
+                        timeout=API_TIMEOUT, label="share_receive"
+                    )
                     check_response(recv_resp)
                     logger.info(f"✅ 链接转存指令已发送: {share_url} -> CID {to_cid}")
                 except Exception as recv_error:
@@ -369,7 +428,10 @@ class P115Service:
         """
         try:
             payload = share_extract_payload(share_url)
-            snap_resp = await self.client.share_snap(payload, async_=True)
+            snap_resp = await self._api_call_with_timeout(
+                self.client.share_snap, payload, async_=True,
+                timeout=API_TIMEOUT, label="share_snap(status)"
+            )
             check_response(snap_resp)
             
             data = snap_resp.get("data", {})
@@ -408,9 +470,11 @@ class P115Service:
         # 方式 1: 使用 fs_search 按文件名搜索（更可靠，不依赖目录缓存）
         for name in target_names:
             try:
-                search_resp = await self.client.fs_search(
-                    {"search_value": name, "cid": cid, "limit": 20}, 
-                    async_=True
+                search_resp = await self._api_call_with_timeout(
+                    self.client.fs_search,
+                    {"search_value": name, "cid": cid, "limit": 20},
+                    async_=True,
+                    timeout=30, max_retries=2, label=f"fs_search({name})"
                 )
                 check_response(search_resp)
                 search_data = search_resp.get("data", [])
@@ -448,7 +512,12 @@ class P115Service:
         logger.info(f"🔍 fs_search 找到 {len(matched)}/{len(target_names)} 个文件，尝试 fs_files 查找剩余: {remaining_names}")
         
         try:
-            resp = await self.client.fs_files({"cid": cid, "limit": 500, "show_dir": 1}, async_=True)
+            resp = await self._api_call_with_timeout(
+                self.client.fs_files,
+                {"cid": cid, "limit": 500, "show_dir": 1},
+                async_=True,
+                timeout=30, max_retries=2, label="fs_files"
+            )
             check_response(resp)
             file_list = resp.get("data", [])
             
@@ -564,7 +633,10 @@ class P115Service:
             for retry_attempt in range(1, max_share_retries + 1):
                 try:
                     logger.info(f"📤 正在创建分享链接 (尝试 {retry_attempt}/{max_share_retries}): {', '.join(names[:3])}...")
-                    send_resp = await self.client.share_send(",".join(new_fids), async_=True)
+                    send_resp = await self._api_call_with_timeout(
+                        self.client.share_send, ",".join(new_fids), async_=True,
+                        timeout=API_TIMEOUT, max_retries=1, label="share_send"
+                    )
                     check_response(send_resp)
                     
                     # Extract share_code
@@ -602,7 +674,10 @@ class P115Service:
                     "share_code": share_code,
                     "share_duration": -1
                 }
-                update_resp = await self.client.share_update(update_payload, async_=True)
+                update_resp = await self._api_call_with_timeout(
+                    self.client.share_update, update_payload, async_=True,
+                    timeout=API_TIMEOUT, max_retries=2, label="share_update"
+                )
                 check_response(update_resp)
                 logger.debug(f"Share update response: {update_resp}")
 
@@ -633,7 +708,10 @@ class P115Service:
                 # 直接删除整个保存目录文件夹
                 save_path = settings.P115_SAVE_DIR or "/分享保存"
                 logger.info(f"🗑️ 正在删除保存目录: {save_path} (CID: {save_dir_cid})")
-                del_resp = await self.client.fs_delete(str(save_dir_cid), async_=True)
+                del_resp = await self._api_call_with_timeout(
+                    self.client.fs_delete, str(save_dir_cid), async_=True,
+                    timeout=API_TIMEOUT, label="fs_delete"
+                )
                 check_response(del_resp)
                 logger.info(f"✅ 保存目录已删除，下次保存时将自动重建")
                 return True
@@ -702,7 +780,10 @@ class P115Service:
                     logger.debug("使用回收站密码")
                 
                 # Call recycle bin cleanup API
-                resp = await self.client.recyclebin_clean_app(payload, async_=True)
+                resp = await self._api_call_with_timeout(
+                    self.client.recyclebin_clean_app, payload, async_=True,
+                    timeout=API_TIMEOUT, label="recyclebin_clean"
+                )
                 check_response(resp)
                 
                 logger.info("✅ 回收站已清空")
