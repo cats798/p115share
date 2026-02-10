@@ -227,6 +227,9 @@ class TGService:
                         if share_link:
                             await p115_service.save_history_link(share_url, share_link)
                             processed_links[share_url] = share_link
+                            # Send detailed success messages requested by user
+                            await message.reply(f"✅ 处理成功！\n长期分享链接：\n{share_link}")
+                            await message.reply(f"🔔 链接保存成功！\n原链接: {share_url}\n新分享: {share_link}")
                             return True
                     elif save_res.get("status") == "pending":
                         # Audit handled by the polling logic (consistent with current design)
@@ -256,14 +259,21 @@ class TGService:
             else:
                 failed_count += 1
         
-        # Final notification
-        result_text = f"✅ 批量处理完成！\n\n成功: {success_count}\n"
-        if pending_count:
-            result_text += f"⏳ 审核中 (转换后自动发布): {pending_count}\n"
-        if failed_count:
-            result_text += f"❌ 失败: {failed_count}\n"
-        
-        await status_msg.edit_text(result_text)
+        if total_links == 1 and success_count == 1:
+            # For single successful link, delete the processing status message to reduce clutter
+            try:
+                await status_msg.delete()
+            except Exception:
+                pass
+        else:
+            # Final notification for batch or failures
+            result_text = f"✅ 批量处理完成！\n\n成功: {success_count}\n"
+            if pending_count:
+                result_text += f"⏳ 审核中 (转换后自动发布): {pending_count}\n"
+            if failed_count:
+                result_text += f"❌ 失败: {failed_count}\n"
+            
+            await status_msg.edit_text(result_text)
 
         # Broadcast to channels (Batch if success > 0)
         if processed_links:
