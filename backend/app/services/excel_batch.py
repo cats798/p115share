@@ -7,6 +7,7 @@ from sqlalchemy import select, update, delete, func
 from app.core.database import async_session
 from app.models.schema import ExcelTask, ExcelTaskItem
 from app.services.p115 import p115_service
+from app.services.tg_bot import tg_service
 
 class ExcelBatchService:
     def __init__(self):
@@ -143,12 +144,28 @@ class ExcelBatchService:
             item = result.scalar_one()
             task_id = item.task_id
             
+            # Get task for target_dir
+            res_task = await session.execute(select(ExcelTask).where(ExcelTask.id == task_id))
+            task = res_task.scalar_one()
+            
             original_url = item.original_url
             if not original_url:
                 item.status = "失败"
                 item.error_msg = "链接为空"
                 await session.commit()
                 await self._update_task_counts(task_id)
+                return
+
+            # 1. Check history first
+            history_url = await p115_service.get_history_link(original_url)
+            if history_url:
+                item.status = "成功"
+                item.new_share_url = history_url
+                await session.commit()
+                await self._update_task_counts(task_id)
+                if tg_service:
+                    msg_content = f"资源名称：{item.title or '未知'}\n分享链接：{history_url}"
+                    await tg_service.broadcast_to_channels({original_url: history_url}, {"full_text": msg_content})
                 return
 
             try:
@@ -162,7 +179,11 @@ class ExcelBatchService:
                 if item.extraction_code and "?password=" not in url_to_save:
                     url_to_save = f"{url_to_save}?password={item.extraction_code}"
 
-                save_res = await p115_service.save_share_link(url_to_save, metadata=metadata)
+                save_res = await p115_service.save_share_link(
+                    url_to_save, 
+                    metadata=metadata,
+                    target_dir=task.target_dir
+                )
                 
                 if save_res:
                     if save_res.get("status") in ["success", "pending"]:
@@ -170,7 +191,13 @@ class ExcelBatchService:
                         share_link = await p115_service.create_share_link(save_res)
                         if share_link:
                             await p115_service.save_history_link(original_url, share_link)
+                            item.new_share_url = share_link
                             item.status = "成功"
+                            
+                            # Broadcast to channels
+                            if tg_service:
+                                msg_content = f"资源名称：{item.title or '未知'}\n分享链接：{share_link}"
+                                await tg_service.broadcast_to_channels({original_url: share_link}, {"full_text": msg_content})
                         else:
                             # If pending, we mark as success because it's queued in 115
                             if save_res.get("status") == "pending":
@@ -217,8 +244,14 @@ class ExcelBatchService:
             )
             await session.commit()
 
-    async def start_task(self, task_id: int, item_ids: list = None):
+    async def start_task(self, task_id: int, item_ids: list = None, target_dir: str = None):
         async with async_session() as session:
+            # Update target_dir if provided
+            if target_dir:
+                await session.execute(
+                    update(ExcelTask).where(ExcelTask.id == task_id).values(target_dir=target_dir)
+                )
+            
             if item_ids:
                 # 将选中的项设为待处理
                 await session.execute(

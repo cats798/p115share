@@ -159,17 +159,17 @@ class P115Service:
         self._save_dir_cid = 0
         logger.debug("🗑️ 已清除保存目录 CID 缓存")
 
-    async def _ensure_save_dir(self):
+    async def _ensure_save_dir(self, path: Optional[str] = None):
         """Ensure the save directory exists and return its CID.
         
-        Uses a cached CID to avoid repeated API calls. If the cached CID
-        is valid, return it directly. On failure, raises an exception
-        instead of returning 0 to prevent saving to root directory.
+        Uses a cached CID to avoid repeated API calls for the default path.
+        If a custom path is provided, it will always verify/create it.
         """
-        path = settings.P115_SAVE_DIR or "/分享保存"
+        is_default = path is None
+        path = path or settings.P115_SAVE_DIR or "/分享保存"
         
-        # Return cached CID if available
-        if self._save_dir_cid > 0:
+        # Return cached CID if available and using default path
+        if is_default and self._save_dir_cid > 0:
             logger.debug(f"📂 使用缓存的保存目录 CID: {self._save_dir_cid}")
             return self._save_dir_cid
         
@@ -207,8 +207,9 @@ class P115Service:
                 if cid == 0:
                     raise RuntimeError(f"无法从响应获取有效的 CID: {resp}")
                     
-                # Cache the CID for future use
-                self._save_dir_cid = cid
+                # Cache the CID only if it's the default path
+                if is_default:
+                    self._save_dir_cid = cid
                 logger.info(f"✅ 保存目录已确认: {path} (CID: {cid})")
                 return cid
                 
@@ -225,12 +226,13 @@ class P115Service:
         # All retries exhausted — raise to prevent saving to root
         raise RuntimeError(f"无法确保保存目录 {path} 存在 (已重试3次): {last_error}")
 
-    async def save_share_link(self, share_url: str, metadata: dict = None):
+    async def save_share_link(self, share_url: str, metadata: dict = None, target_dir: Optional[str] = None):
         """Save a 115 share link to the configured directory
         
         Args:
             share_url: The 115 share URL to save
             metadata: Optional metadata dict containing description, full_text, photo_id, etc.
+            target_dir: Optional target directory path
         """
         async with self._acquire_task_lock("save_share"):
             if not self.client:
@@ -331,7 +333,7 @@ class P115Service:
                 
                 while True:
                     try:
-                        to_cid = await self._ensure_save_dir()
+                        to_cid = await self._ensure_save_dir(target_dir)
                         if network_attempt > 0:
                             logger.info(f"🎉 网络已恢复，继续处理任务 (等待了 {time.time() - network_start:.0f}s)")
                         break

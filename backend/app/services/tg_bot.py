@@ -208,6 +208,8 @@ class TGService:
                 if history_share_link:
                     logger.info(f"✨ [{index}/{total_links}] 发现历史记录: {share_url}")
                     processed_links[share_url] = history_share_link
+                    await message.reply(f"✅ 处理成功！\n长期分享链接：\n{history_share_link}")
+                    await message.reply(f"🔔 链接保存成功！\n原链接: {share_url}\n新分享: {history_share_link}")
                     return True, history_share_link
 
                 # 1. Save link with metadata
@@ -337,6 +339,17 @@ class TGService:
                             "full_text": target_segment["text"],
                             "entities": target_segment["entities"],
                             "photo_id": target_segment["photo_id"]
+                        }
+                    )
+                else:
+                    # URL not found in visible text (e.g. text_link entity),
+                    # broadcast with the full original message metadata
+                    await self.broadcast_to_channels(
+                        {url: share_link},
+                        {
+                            "full_text": full_text,
+                            "entities": ser_entities,
+                            "photo_id": photo.file_id if photo else None
                         }
                     )
             elif res == "pending":

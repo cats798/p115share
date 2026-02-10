@@ -47,6 +47,7 @@ class ExcelTask(Base):
     total_count: Mapped[int] = mapped_column(Integer, default=0)
     success_count: Mapped[int] = mapped_column(Integer, default=0)
     fail_count: Mapped[int] = mapped_column(Integer, default=0)
+    target_dir: Mapped[str] = mapped_column(String(255), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 class ExcelTaskItem(Base):
@@ -59,5 +60,6 @@ class ExcelTaskItem(Base):
     title: Mapped[str] = mapped_column(String(255), nullable=True)
     extraction_code: Mapped[str] = mapped_column(String(50), nullable=True)
     status: Mapped[str] = mapped_column(String(20), default="待处理")  # 待处理, 处理中, 成功, 失败, 跳过
+    new_share_url: Mapped[str] = mapped_column(String(255), nullable=True)
     error_msg: Mapped[str] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)

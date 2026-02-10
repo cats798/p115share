@@ -173,13 +173,9 @@
             <div class="section-title"><SettingOutlined /> 转存分享配置</div>
             <div class="control-form">
                <div class="form-row">
-                  <div class="form-item disabled">
-                     <label>目标账号</label>
-                     <div class="fake-input">115网盘1 <a-tag color="blue">115网盘</a-tag></div>
-                  </div>
-                  <div class="form-item disabled">
+                  <div class="form-item">
                      <label>目标目录</label>
-                     <div class="fake-input">/云下载 <a-button size="small" disabled>选择目录</a-button></div>
+                     <a-input v-model:value="targetDir" placeholder="请输入 115 目录路径（如 /云下载），必填" />
                   </div>
                </div>
                <div class="form-row">
@@ -193,7 +189,7 @@
                <div class="form-actions">
                   <a-space>
                     <a-button 
-                      v-if="currentTask?.status === 'wait' || currentTask?.status === 'paused' || currentTask?.status === 'cancelled'" 
+                      v-if="currentTask?.status === 'wait' || currentTask?.status === 'paused' || currentTask?.status === 'cancelled' || currentTask?.status === 'completed'" 
                       type="primary" 
                       @click="handleStartTask" 
                       :disabled="selectedRowKeys.length === 0"
@@ -346,7 +342,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, onMounted, computed, onUnmounted } from 'vue';
+import { ref, reactive, onMounted, computed, onUnmounted, watch } from 'vue';
 import { 
   FileExcelOutlined, 
   DownloadOutlined, 
@@ -389,6 +385,8 @@ const pagination = reactive({
 const filterStatus = ref<string | undefined>(undefined);
 const searchQuery = ref('');
 const selectedRowKeys = ref<any[]>([]);
+const targetDir = ref('');
+const systemSaveDir = ref('/分享保存');
 
 // Upload & Mapping
 const mappingModalVisible = ref(false);
@@ -410,6 +408,7 @@ const columns = [
   { title: '分享链接', dataIndex: 'original_url', key: 'original_url', ellipsis: true },
   { title: '资源名称', dataIndex: 'title', key: 'title', ellipsis: true },
   { title: '状态', dataIndex: 'status', key: 'status', width: 100 },
+  { title: '新分享链接', dataIndex: 'new_share_url', key: 'new_share_url', ellipsis: true },
   { title: '错误信息', dataIndex: 'error_msg', key: 'error_msg', ellipsis: true },
 ];
 
@@ -432,9 +431,39 @@ const fetchTasks = async () => {
   }
 };
 
-const fetchItems = async () => {
+const fetchSettings = async () => {
+  try {
+    const res = await axios.get('/api/config/');
+    if (res.data.p115_save_dir) {
+      systemSaveDir.value = res.data.p115_save_dir;
+      if (!targetDir.value) {
+        targetDir.value = res.data.p115_save_dir;
+      }
+    }
+  } catch (e) {
+    console.error('获取设置失败', e);
+  }
+};
+
+const fetchCurrentTask = async () => {
   if (!currentTaskId.value) return;
-  itemsLoading.value = true;
+  try {
+    const res = await axios.get(`/api/excel/tasks/${currentTaskId.value}`);
+    if (res.data.status === 'success') {
+      const updatedTask = res.data.data;
+      const index = tasks.value.findIndex(t => t.id === updatedTask.id);
+      if (index !== -1) {
+        tasks.value[index] = updatedTask;
+      }
+    }
+  } catch (e) {
+    console.error('获取任务详情失败', e);
+  }
+};
+
+const fetchItems = async (silent = false) => {
+  if (!currentTaskId.value) return;
+  if (!silent) itemsLoading.value = true;
   try {
     const res = await axios.get(`/api/excel/tasks/${currentTaskId.value}/items`, {
       params: {
@@ -518,9 +547,14 @@ const handleMappingOk = async () => {
 
 const handleStartTask = async () => {
   if (!currentTaskId.value) return;
+  if (!targetDir.value) {
+    message.warning('请输入目标目录');
+    return;
+  }
   try {
     await axios.post(`/api/excel/tasks/${currentTaskId.value}/start`, {
-      item_ids: selectedRowKeys.value
+      item_ids: selectedRowKeys.value,
+      target_dir: targetDir.value
     });
     message.success('正在启动转存分享...');
     await fetchTasks();
@@ -578,6 +612,7 @@ const handleDeleteTask = () => {
 
 const handleTableChange = (pag: any) => {
   pagination.current = pag.current;
+  pagination.pageSize = pag.pageSize;
   fetchItems();
 };
 
@@ -605,14 +640,22 @@ const isLinkCol = (h: string) => /链接|url|link|s\/|115/i.test(h);
 const isTitleCol = (h: string) => /标题|名称|资源|name|title/i.test(h);
 const isCodeCol = (h: string) => /提取码|访问码|密码|code|pwd|password|msg/i.test(h);
 
+watch([currentTaskId, () => currentTask.value?.status], ([newId, status]) => {
+  if (pollTimer) {
+     clearInterval(pollTimer);
+     pollTimer = null;
+  }
+  if (newId && status === 'running') {
+    pollTimer = setInterval(() => {
+      fetchCurrentTask();
+      fetchItems(true); // silent fetch for background update
+    }, 3000);
+  }
+}, { immediate: true });
+
 onMounted(() => {
   fetchTasks();
-  pollTimer = setInterval(() => {
-    fetchTasks();
-    if (currentTask.value?.status === 'running') {
-      fetchItems();
-    }
-  }, 3000);
+  fetchSettings();
 });
 
 onUnmounted(() => {
