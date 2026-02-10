@@ -151,135 +151,138 @@ class TGService:
         
         # Debug logging
         logger.debug(f"📨 收到消息 - 文本长度: {len(full_text)}, 图片: {bool(photo)}, 实体数量: {len(entities)}")
-        if entities:
-            logger.debug(f"📋 实体详情: {[(e.type, e.url if hasattr(e, 'url') else None) for e in entities]}")
         
-        # Extract URLs from entities (hyperlinks)
+        # Extract all URLs from entities (hyperlinks)
         entity_urls = []
         for entity in entities:
             if entity.type == "text_link" and hasattr(entity, 'url'):
                 entity_urls.append(entity.url)
-                logger.debug(f"🔗 从 text_link 实体提取到 URL: {entity.url}")
             elif entity.type == "url":
-                # Extract plain URL from text
                 start = entity.offset
                 end = entity.offset + entity.length
                 url = full_text[start:end]
                 entity_urls.append(url)
-                logger.debug(f"🔗 从 url 实体提取到 URL: {url}")
         
         # 115 Link Detection (Regex)
         link_pattern = r'https?://(?:115\.com|115cdn\.com|anxia\.com)/s/[a-zA-Z0-9]+(?:\?password=[a-zA-Z0-9]+)?'
         
-        # First try to find link in text
-        match = re.search(link_pattern, full_text)
-        share_url = None
+        # Extract links from text and entity URLs
+        text_links = re.findall(link_pattern, full_text)
+        all_potential_links = text_links + [url for url in entity_urls if re.match(link_pattern, url)]
         
-        if match:
-            share_url = match.group(0)
-            logger.info(f"✅ 从文本中检测到 115 链接: {share_url}")
-        else:
-            # Try entity URLs
-            for url in entity_urls:
-                if re.match(link_pattern, url):
-                    share_url = url
-                    logger.info(f"✅ 从实体中检测到 115 链接: {share_url}")
-                    break
+        # Deduplicate while preserving order
+        share_urls = []
+        seen = set()
+        for url in all_potential_links:
+            if url not in seen:
+                share_urls.append(url)
+                seen.add(url)
         
-        if not share_url:
+        if not share_urls:
             logger.debug(f"❌ 未检测到 115 链接 - 文本: '{full_text[:100]}...', 实体URLs: {entity_urls}")
+            if not full_text.startswith("/"):
+                await message.answer("⚠️ 请发送有效的 115 分享链接。\n支持域名: 115.com, 115cdn.com, anxia.com")
+            return
+
+        total_links = len(share_urls)
+        logger.info(f"🎯 发现 {total_links} 个 115 链接，开始批量处理...")
         
-        if share_url:
-            logger.info(f"🎯 开始处理来自 {message.chat.id} 的 115 链接: {share_url}")
-            
-            # Extract description
-            description = ""
-            if match:
-                description = full_text[:match.start()].strip()
-            else:
-                description = full_text.strip()
-            
-            logger.debug(f"📝 提取的描述: {description[:100]}...")
-            
-            status_msg = await message.answer("⌛️ 正在处理链接，请稍候...")
-            
-            # 0. Check history first
-            history_share_link = await p115_service.get_history_link(share_url)
-            
-            # Convert entities for JSON serialization
-            ser_entities = []
-            if entities:
-                for e in entities:
-                    try:
-                        ser_entities.append(e.model_dump())
-                    except AttributeError:
-                        ser_entities.append(dict(e))
+        status_msg = await message.answer(f"⌛️ 正在处理 {total_links} 个链接，请稍候...")
+        
+        # Prepare metadata entities common logic
+        ser_entities = []
+        if entities:
+            for e in entities:
+                try:
+                    ser_entities.append(e.model_dump())
+                except AttributeError:
+                    ser_entities.append(dict(e))
 
-            if history_share_link:
-                logger.info(f"✨ 发现历史记录，直接使用缓存链接: {share_url} -> {history_share_link}")
-                await status_msg.edit_text("⚡ 发现历史记录，正在秒传...")
+        processed_links = {} # {original_url: share_link}
+        
+        async def process_single_link(share_url, index):
+            try:
+                # 0. Check history first
+                history_share_link = await p115_service.get_history_link(share_url)
                 
-                # Post to channels
-                await self.broadcast_to_channels(history_share_link, {
+                if history_share_link:
+                    logger.info(f"✨ [{index}/{total_links}] 发现历史记录: {share_url}")
+                    processed_links[share_url] = history_share_link
+                    return True
+
+                # 1. Save link with metadata
+                metadata = {
+                    "description": full_text.strip(),
                     "full_text": full_text,
-                    "entities": ser_entities,
                     "photo_id": photo.file_id if photo else None,
-                    "share_url": share_url
-                })
+                    "share_url": share_url,
+                    "entities": ser_entities
+                }
+                save_res = await p115_service.save_share_link(share_url, metadata=metadata)
+                
+                if save_res:
+                    if save_res.get("status") == "success":
+                        # 2. Create long-term share
+                        share_link = await p115_service.create_share_link(save_res)
+                        if share_link:
+                            await p115_service.save_history_link(share_url, share_link)
+                            processed_links[share_url] = share_link
+                            return True
+                    elif save_res.get("status") == "pending":
+                        # Audit handled by the polling logic (consistent with current design)
+                        logger.info(f"🔍 分享链接正在审核中: {share_url}")
+                        asyncio.create_task(self.poll_pending_link(message, save_res))
+                        return "pending"
+                
+                return False
+            except Exception as e:
+                logger.error(f"❌ 处理链接出错 {share_url}: {e}")
+                return False
 
-                await status_msg.edit_text(f"⚡ 秒传成功！(历史记录)\n长期分享链接：\n{history_share_link}")
-                return
+        # Process links sequentially
+        success_count = 0
+        pending_count = 0
+        failed_count = 0
+        
+        for i, url in enumerate(share_urls, 1):
+            if total_links > 1:
+                await status_msg.edit_text(f"⏳ 正在处理第 {i}/{total_links} 个链接...")
             
-            # 1. Save link with metadata
-            metadata = {
-                "description": description,
-                "full_text": full_text,
-                "photo_id": photo.file_id if photo else None,
-                "share_url": share_url,
-                "entities": ser_entities
-            }
-            save_res = await p115_service.save_share_link(share_url, metadata=metadata)
-            
-            if save_res and save_res.get("status") == "success":
-                await status_msg.edit_text("✅ 链接转存成功，正在为您生成长期分享链接 (预计等待 10 秒)...")
-                
-                # 2. Create long-term share
-                share_link = await p115_service.create_share_link(save_res)
-                
-                # Save to history
-                if share_link:
-                    await p115_service.save_history_link(share_url, share_link)
-                
-                # 3. Post to channels
-                await self.broadcast_to_channels(share_link, metadata)
-
-                # 4. Notify user if ID configured
-                if settings.TG_USER_ID:
-                    try:
-                        await self.bot.send_message(settings.TG_USER_ID, f"🔔 链接保存成功！\n原链接: {share_url}\n新分享: {share_link}")
-                    except Exception as e:
-                        logger.error(f"Failed to send notification to user: {e}")
-
-                await status_msg.edit_text(f"✅ 处理成功！\n长期分享链接：\n{share_link}")
-            elif save_res and save_res.get("status") == "pending":
-                await status_msg.edit_text("🔍 分享链接正在审核中，将在审核通过后，进行保存分享处理")
-                logger.info(f"🚀 启动后台轮询任务，处理审核中链接: {share_url}")
-                asyncio.create_task(self.poll_pending_link(message, save_res))
-            elif save_res and save_res.get("status") == "error":
-                error_type = save_res.get("error_type")
-                msg = save_res.get("message", "保存链接失败")
-                if error_type == "expired":
-                    await status_msg.edit_text(f"⚠️ {msg}，请检查分享是否已失效。")
-                elif error_type == "violated":
-                    await status_msg.edit_text(f"🚫 {msg}，115 暂不支持转存包含敏感内容的分享。")
-                else:
-                    await status_msg.edit_text(f"❌ {msg}")
+            res = await process_single_link(url, i)
+            if res is True:
+                success_count += 1
+            elif res == "pending":
+                pending_count += 1
             else:
-                await status_msg.edit_text("❌ 保存链接失败，请检查 Cookie 或链接有效性。")
-        elif full_text.startswith("/"):
-             pass
-        else:
-            await message.answer("⚠️ 请发送有效的 115 分享链接。\n支持域名: 115.com, 115cdn.com, anxia.com")
+                failed_count += 1
+        
+        # Final notification
+        result_text = f"✅ 批量处理完成！\n\n成功: {success_count}\n"
+        if pending_count:
+            result_text += f"⏳ 审核中 (转换后自动发布): {pending_count}\n"
+        if failed_count:
+            result_text += f"❌ 失败: {failed_count}\n"
+        
+        await status_msg.edit_text(result_text)
+
+        # Broadcast to channels (Batch if success > 0)
+        if processed_links:
+            await self.broadcast_to_channels(processed_links, {
+                "full_text": full_text,
+                "entities": ser_entities,
+                "photo_id": photo.file_id if photo else None
+            })
+
+        # Notify admin if configured
+        if settings.TG_USER_ID and str(message.chat.id) != str(settings.TG_USER_ID):
+            try:
+                await self.bot.send_message(
+                    settings.TG_USER_ID, 
+                    f"📢 用户 {message.chat.id} 提交了 {total_links} 个链接\n{result_text}"
+                )
+            except Exception as e:
+                logger.error(f"Failed to notify admin: {e}")
+
 
     async def poll_pending_link(self, message: types.Message, pending_info: dict):
         """Poll the status of a pending link and process it when ready"""
@@ -320,7 +323,8 @@ class TGService:
                     
                     if share_link:
                         await p115_service.save_history_link(share_url, share_link)
-                        await self.broadcast_to_channels(share_link, metadata)
+                        # Broadcast single successful link from poll
+                        await self.broadcast_to_channels({share_url: share_link}, metadata)
                         
                         success_text = f"✅ 审核已通过！链接处理完成。\n原链接: {share_url}\n新分享: {share_link}"
                         await message.reply(success_text)
@@ -346,122 +350,8 @@ class TGService:
         """Calculate length in UTF-16 code units"""
         return len(text.encode('utf-16-le')) // 2
 
-    def _update_access_codes(self, text: str, entities: list, share_link: str) -> tuple[str, list]:
-        """Update access codes in text to match the new link"""
-        from urllib.parse import urlparse, parse_qs
-        import re
-        
-        parsed = urlparse(share_link)
-        params = parse_qs(parsed.query)
-        new_pwd = params.get("password", [""])[0]
-        
-        if not new_pwd:
-            return text, entities
-
-        patterns = [
-            r'((?:访问码|提取码|密码)(?:：|:|%EF%BC%9A|%3A)\s*)([a-zA-Z0-9]{4})',
-            r'((?:%E8%AE%BF%E9%97%AE%E7%A0%81|%E6%8F%90%E5%8F%96%E7%A0%81|%E5%AF%86%E7%A0%81)(?:%EF%BC%9A|%3A)(?:%20)*)([a-zA-Z0-9]{4})'
-        ]
-        
-        current_text = text
-        current_entities = entities
-        
-        for pattern in patterns:
-            while True:
-                match = re.search(pattern, current_text, flags=re.IGNORECASE)
-                if not match:
-                    break
-                
-                prefix, old_code = match.groups()
-                if old_code == new_pwd:
-                    break 
-
-                old_str = f"{prefix}{old_code}"
-                new_str = f"{prefix}{new_pwd}"
-                current_text, current_entities = self._replace_text_and_adjust_entities(
-                    current_text, current_entities, old_str, new_str
-                )
-        return current_text, current_entities
-
-    def _replace_text_and_adjust_entities(self, text: str, entities: list, old_str: str, new_str: str):
-        """Helper to replace text and shift entity offsets/lengths accordingly"""
-        has_text_match = old_str in text
-        
-        if has_text_match:
-            start_pos_char = text.find(old_str)
-            end_pos_char = start_pos_char + len(old_str)
-            
-            start_pos_u16 = self._get_utf16_len(text[:start_pos_char])
-            old_len_u16 = self._get_utf16_len(old_str)
-            end_pos_u16 = start_pos_u16 + old_len_u16
-            new_len_u16 = self._get_utf16_len(new_str)
-            diff_u16 = new_len_u16 - old_len_u16
-            
-            new_text = text[:start_pos_char] + new_str + text[end_pos_char:]
-        else:
-            new_text = text
-            start_pos_u16 = -1
-            end_pos_u16 = -1
-            old_len_u16 = self._get_utf16_len(old_str) 
-            new_len_u16 = self._get_utf16_len(new_str)
-            diff_u16 = new_len_u16 - old_len_u16
-
-        new_entities = []
-        if entities:
-            from aiogram.types import MessageEntity
-            for entity in entities:
-                is_dict = isinstance(entity, dict)
-                e_offset = entity.get("offset") if is_dict else entity.offset
-                e_length = entity.get("length") if is_dict else entity.length
-                e_url = (entity.get("url") if is_dict else getattr(entity, "url", None))
-                e_type = entity.get("type") if is_dict else entity.type
-                
-                if has_text_match:
-                    if e_offset >= end_pos_u16:
-                        e_offset += diff_u16
-                    elif e_offset <= start_pos_u16 and (e_offset + e_length) >= end_pos_u16:
-                        e_length += diff_u16
-                    elif e_offset == start_pos_u16 and e_length == old_len_u16:
-                        e_length = new_len_u16
-                
-                if e_url == old_str:
-                    e_url = new_str
-
-                new_entities.append(MessageEntity(
-                    type=e_type,
-                    offset=e_offset,
-                    length=e_length,
-                    url=e_url,
-                    user=entity.get("user") if is_dict else getattr(entity, "user", None),
-                    language=entity.get("language") if is_dict else getattr(entity, "language", None),
-                    custom_emoji_id=entity.get("custom_emoji_id") if is_dict else getattr(entity, "custom_emoji_id", None)
-                ))
-        return new_text, new_entities
-
-    async def broadcast_to_channels(self, share_link: str, metadata: dict):
-        """Broadcast processed link to all configured and enabled channels"""
-        import json
-        channels = []
-        try:
-            channels = json.loads(settings.TG_CHANNELS)
-        except Exception:
-            pass
-            
-        legacy_id = settings.TG_CHANNEL_ID
-        if legacy_id and not any(c.get("id") == str(legacy_id) for c in channels):
-            channels.append({"id": str(legacy_id), "enabled": True, "concise": False})
-            
-        enabled_channels = [c for c in channels if c.get("enabled")]
-        
-        if not enabled_channels:
-            logger.debug("没有已配置或已启用的频道，跳过广播")
-            return
-            
-        for chan in enabled_channels:
-            await self._post_to_single_channel(chan, share_link, metadata)
-
-    async def _post_to_single_channel(self, channel_config: dict, share_link: str, metadata: dict):
-        """Helper to post to a single channel based on its configuration"""
+    async def _post_to_single_channel_batch(self, channel_config: dict, share_links_map: dict, metadata: dict):
+        """Post to a single channel with multiple link replacements"""
         channel_id = channel_config.get("id")
         is_concise = channel_config.get("concise", False)
         
@@ -470,35 +360,38 @@ class TGService:
             
         full_text = metadata.get("full_text", "")
         photo_id = metadata.get("photo_id")
-        share_url = metadata.get("share_url", "")
         entities_raw = metadata.get("entities", [])
         
         from aiogram.types import MessageEntity
         entities = []
         for e in entities_raw:
             if isinstance(e, dict):
-                try:
-                    entities.append(MessageEntity(**e))
-                except Exception:
-                    pass
+                try: entities.append(MessageEntity(**e))
+                except Exception: pass
             else:
                 entities.append(e)
 
         try:
             if is_concise:
-                new_text = f"✅ 处理成功！\n长期分享链接：\n{share_link}"
-                new_entities = None
-            else:
-                if share_url:
-                    new_text, new_entities = self._replace_text_and_adjust_entities(
-                        full_text, entities, share_url, share_link
-                    )
-                    new_text, new_entities = self._update_access_codes(new_text, new_entities, share_link)
-                else:
-                    new_text = f"✅ 自动转存成功\n\n{full_text}\n\n🔗 长期有效链接: {share_link}"
-                    new_entities = None
+                for original_url, share_link in share_links_map.items():
+                    await self.bot.send_message(channel_id, f"✅ 处理成功！\n链接：{share_link}")
+                return
 
-            if photo_id and not is_concise:
+            # Batch replacement logic
+            new_text = full_text
+            new_entities = entities
+            
+            # 1. Replace all URLs (in text and entities)
+            for old_url, new_url in share_links_map.items():
+                if not old_url: continue
+                new_text, new_entities = self._replace_text_and_adjust_entities(
+                    new_text, new_entities, old_url, new_url
+                )
+            
+            # 2. Update all access codes
+            new_text, new_entities = self._update_access_codes(new_text, new_entities, share_links_map)
+
+            if photo_id:
                 max_len_utf16 = 1024
                 current_len_utf16 = self._get_utf16_len(new_text)
                 if current_len_utf16 > max_len_utf16:
@@ -527,9 +420,153 @@ class TGService:
                     entities=new_entities,
                     disable_web_page_preview=False
                 )
-            logger.info(f"已将推送发送至频道: {channel_id} (简洁: {is_concise})")
+            logger.info(f"已将推送发送至频道: {channel_id}")
         except Exception as e:
             logger.error(f"Failed to post to channel {channel_id}: {e}")
+
+    def _update_access_codes(self, text: str, entities: list, share_links_map: dict) -> tuple[str, list]:
+        """Update access codes in text to match new links for multiple pairs"""
+        from urllib.parse import urlparse, parse_qs
+        import re
+        
+        current_text = text
+        current_entities = list(entities)
+        
+        # Sort original URLs by their appearance in text
+        sorted_originals = sorted(share_links_map.keys(), key=lambda url: text.find(url) if url in text else 999999)
+
+        for old_url in sorted_originals:
+            share_link = share_links_map[old_url]
+            parsed = urlparse(share_link)
+            params = parse_qs(parsed.query)
+            new_pwd = params.get("password", [""])[0]
+            
+            if not new_pwd:
+                continue
+
+            pwd_patterns = [
+                r'((?:访问码|提取码|密码)(?:：|:|%EF%BC%9A|%3A)\s*)([a-zA-Z0-9]{4})',
+                r'((?:%E8%AE%BF%E9%97%AE%E7%A0%81|%E6%8F%90%E5%8F%96%E7%A0%81|%E5%AF%86%E7%A0%81)(?:%EF%BC%9A|%3A)(?:%20)*)([a-zA-Z0-9]{4})'
+            ]
+            
+            search_start = 0
+            if old_url in current_text:
+                search_start = current_text.find(old_url)
+            elif share_link in current_text:
+                search_start = current_text.find(share_link)
+            
+            best_match = None
+            best_start = 999999
+            
+            for pattern in pwd_patterns:
+                for match in re.finditer(pattern, current_text[search_start:], flags=re.IGNORECASE):
+                    start = search_start + match.start()
+                    if start < best_start:
+                        best_start = start
+                        best_match = match
+                
+            if best_match:
+                prefix, old_code = best_match.groups()
+                if old_code != new_pwd:
+                    old_str = f"{prefix}{old_code}"
+                    new_str = f"{prefix}{new_pwd}"
+                    current_text, current_entities = self._replace_text_and_adjust_entities(
+                        current_text, current_entities, old_str, new_str
+                    )
+                    
+        return current_text, current_entities
+
+    def _replace_text_and_adjust_entities(self, text: str, entities: list, old_str: str, new_str: str):
+        """Helper to replace text and shift entity offsets/lengths accordingly"""
+        has_text_match = old_str in text
+        
+        if not has_text_match:
+            # Check if any text_link URL matches
+            new_entities = []
+            changed = False
+            for entity in entities:
+                if hasattr(entity, 'url') and entity.url == old_str:
+                    entity.url = new_str
+                    changed = True
+                new_entities.append(entity)
+            return text, new_entities
+
+        start_pos_char = text.find(old_str)
+        end_pos_char = start_pos_char + len(old_str)
+        
+        start_pos_u16 = self._get_utf16_len(text[:start_pos_char])
+        old_len_u16 = self._get_utf16_len(old_str)
+        end_pos_u16 = start_pos_u16 + old_len_u16
+        new_len_u16 = self._get_utf16_len(new_str)
+        diff_u16 = new_len_u16 - old_len_u16
+        
+        new_text = text[:start_pos_char] + new_str + text[end_pos_char:]
+
+        new_entities = []
+        if entities:
+            from aiogram.types import MessageEntity
+            for entity in entities:
+                is_dict = isinstance(entity, dict)
+                e_offset = entity.get("offset") if is_dict else entity.offset
+                e_length = entity.get("length") if is_dict else entity.length
+                e_url = (entity.get("url") if is_dict else getattr(entity, "url", None))
+                e_type = entity.get("type") if is_dict else entity.type
+                
+                if e_offset >= end_pos_u16:
+                    e_offset += diff_u16
+                elif e_offset <= start_pos_u16 and (e_offset + e_length) >= end_pos_u16:
+                    e_length += diff_u16
+                elif e_offset == start_pos_u16 and e_length == old_len_u16:
+                    e_length = new_len_u16
+                
+                if e_url == old_str:
+                    e_url = new_str
+
+                new_entities.append(MessageEntity(
+                    type=e_type,
+                    offset=e_offset,
+                    length=e_length,
+                    url=e_url,
+                    user=entity.get("user") if is_dict else getattr(entity, "user", None),
+                    language=entity.get("language") if is_dict else getattr(entity, "language", None),
+                    custom_emoji_id=entity.get("custom_emoji_id") if is_dict else getattr(entity, "custom_emoji_id", None)
+                ))
+        return new_text, new_entities
+
+    async def broadcast_to_channels(self, share_links_map: dict, metadata: dict):
+        """Broadcast processed link(s) to all configured and enabled channels"""
+        import json
+        channels = []
+        try:
+            channels = json.loads(settings.TG_CHANNELS)
+        except Exception:
+            pass
+            
+        legacy_id = settings.TG_CHANNEL_ID
+        if legacy_id and not any(c.get("id") == str(legacy_id) for c in channels):
+            channels.append({"id": str(legacy_id), "enabled": True, "concise": False})
+            
+        enabled_channels = [c for c in channels if c.get("enabled")]
+        
+        if not enabled_channels:
+            logger.debug("没有已配置或已启用的频道，跳过广播")
+            return
+            
+        for chan in enabled_channels:
+            is_concise = chan.get("concise", False)
+            if is_concise:
+                # Concise mode: Every success link gets a separate simple message
+                for original_url, share_link in share_links_map.items():
+                    temp_meta = metadata.copy()
+                    temp_meta["share_url"] = original_url
+                    await self._post_to_single_channel(chan, share_link, temp_meta)
+            else:
+                # Normal mode: Single broadcast with all links replaced
+                await self._post_to_single_channel_batch(chan, share_links_map, metadata)
+
+    async def _post_to_single_channel(self, channel_config: dict, share_link: str, metadata: dict):
+        """Legacy helper for single link post (still used by poll_pending or concise)"""
+        await self._post_to_single_channel_batch(channel_config, {metadata.get("share_url", ""): share_link}, metadata)
 
     async def _delete_pending_task(self, db_id: int):
         if db_id:
