@@ -15,9 +15,40 @@
           <a-form-item label="Bot Token" name="tg_bot_token">
             <a-input-password v-model:value="formState.tg_bot_token" placeholder="请输入 TG Bot Token" />
           </a-form-item>
-          <a-form-item label="Channel ID" name="tg_channel_id" extra="注意：Bot 必须被设为该频道的管理员才能发送消息">
-            <a-input v-model:value="formState.tg_channel_id" placeholder="例如 @channel_name 或 -100xxxx" />
-          </a-form-item>
+          
+          <a-divider orientation="left">推送频道列表</a-divider>
+          
+          <div v-for="(channel, index) in tgChannels" :key="index" class="channel-item">
+            <a-row :gutter="16" align="middle">
+              <a-col :span="10">
+                <a-form-item :label="index === 0 ? 'Channel ID' : ''" :style="{ marginBottom: index === 0 ? '24px' : '8px' }">
+                  <a-input v-model:value="channel.id" placeholder="@channel_name 或 -100xxxx" />
+                </a-form-item>
+              </a-col>
+              <a-col :span="4">
+                <a-form-item :label="index === 0 ? '启用' : ''" :style="{ marginBottom: index === 0 ? '24px' : '8px' }">
+                  <a-switch v-model:checked="channel.enabled" />
+                </a-form-item>
+              </a-col>
+              <a-col :span="4">
+                <a-form-item :label="index === 0 ? '简洁模式' : ''" :style="{ marginBottom: index === 0 ? '24px' : '8px' }">
+                  <a-switch v-model:checked="channel.concise" />
+                </a-form-item>
+              </a-col>
+              <a-col :span="6" :style="{ paddingTop: index === 0 ? '24px' : '0' }">
+                <a-button type="link" danger @click="removeChannel(index)">
+                  <template #icon><DeleteOutlined /></template>
+                  删除
+                </a-button>
+              </a-col>
+            </a-row>
+          </div>
+          
+          <a-button type="dashed" block @click="addChannel" style="margin-bottom: 24px">
+            <template #icon><PlusOutlined /></template>
+            添加推送频道
+          </a-button>
+
           <a-form-item label="User ID" name="tg_user_id">
             <a-input v-model:value="formState.tg_user_id" placeholder="接收保存成功通知的用户 ID" />
           </a-form-item>
@@ -28,7 +59,7 @@
           <a-divider />
           <a-button type="primary" @click="onFinish('tg')" :loading="loading" block>保存 Telegram 配置</a-button>
         </a-collapse-panel>
- 
+
         <a-collapse-panel key="p115" header="115 网盘配置">
           <a-form-item label="Cookie" name="p115_cookie">
             <a-textarea v-model:value="formState.p115_cookie" :rows="4" placeholder="请输入 115 Cookie" />
@@ -51,7 +82,7 @@
           <a-divider />
           <a-button type="primary" @click="onFinish('p115')" :loading="loading" block>保存 115 配置</a-button>
         </a-collapse-panel>
- 
+
         <a-collapse-panel key="proxy" header="代理配置">
           <a-form-item label="启用代理" style="margin-bottom: 16px">
             <a-switch v-model:checked="formState.proxy_enabled" />
@@ -70,7 +101,7 @@
                 </a-form-item>
               </a-col>
             </a-row>
- 
+
             <a-row :gutter="16">
               <a-col :span="12">
                 <a-form-item label="用户名 (可选)" name="proxy_user">
@@ -83,7 +114,7 @@
                 </a-form-item>
               </a-col>
             </a-row>
- 
+
             <a-row :gutter="16">
               <a-col :span="14">
                 <a-form-item label="协议类型" name="proxy_type" style="margin-bottom: 0">
@@ -101,7 +132,7 @@
                 </a-button>
               </a-col>
             </a-row>
- 
+
             <div style="margin-top: 24px; display: flex; gap: 8px">
               <a-button @click="testProxy" :loading="testingProxy">测试代理连接</a-button>
             </div>
@@ -119,15 +150,23 @@
 import { reactive, ref, onMounted, computed } from 'vue';
 import axios from 'axios';
 import { message } from 'ant-design-vue';
-import { SearchOutlined } from '@ant-design/icons-vue';
+import { SearchOutlined, PlusOutlined, DeleteOutlined } from '@ant-design/icons-vue';
 
 const loading = ref(false);
 const testingProxy = ref(false);
 const detecting = ref(false);
 const formRef = ref();
+
+interface ChannelConfig {
+  id: string;
+  enabled: boolean;
+  concise: boolean;
+}
+
+const tgChannels = ref<ChannelConfig[]>([]);
+
 const formState = reactive({
   tg_bot_token: '',
-  tg_channel_id: '',
   tg_user_id: '',
   tg_allow_chats: '',
   p115_cookie: '',
@@ -143,9 +182,16 @@ const formState = reactive({
   proxy_type: 'HTTP'
 });
 
+const addChannel = () => {
+  tgChannels.value.push({ id: '', enabled: true, concise: false });
+};
+
+const removeChannel = (index: number) => {
+  tgChannels.value.splice(index, 1);
+};
+
 const validateCron = (_rule: any, value: string) => {
   if (!value) return Promise.resolve();
-  // Simple cron regex for 5 fields
   const cronRegex = /^(\*|[0-5]?\d)(?:\/[0-5]?\d)?\s+(\*|[01]?\d|2[0-3])(?:\/[01]?\d|2[0-3])?\s+(\*|0?[1-9]|[12]\d|3[01])(?:\/0?[1-9]|[12]\d|3[01])?\s+(\*|0?[1-9]|1[0-2])(?:\/0?[1-9]|1[0-2])?\s+(\*|[0-6])(?:\/[0-6])?$/;
   if (cronRegex.test(value)) {
     return Promise.resolve();
@@ -169,7 +215,6 @@ const validateProxyPort = (_rule: any, value: string) => {
 
 const rules = computed(() => ({
   tg_bot_token: [{ required: true, message: '请输入 Bot Token', trigger: 'blur' }],
-  tg_channel_id: [{ required: true, message: '请输入 Channel ID', trigger: 'blur' }],
   tg_user_id: [{ required: true, message: '请输入 User ID', trigger: 'blur' }],
   tg_allow_chats: [{ required: true, message: '请输入 Chat ID 白名单', trigger: 'blur' }],
   p115_cookie: [{ required: true, message: '请输入 Cookie', trigger: 'blur' }],
@@ -184,9 +229,22 @@ const loadConfig = async () => {
   try {
     const res = await axios.get('/api/config/');
     formState.tg_bot_token = res.data.tg_bot_token || '';
-    formState.tg_channel_id = res.data.tg_channel_id || '';
     formState.tg_user_id = res.data.tg_user_id || '';
     formState.tg_allow_chats = res.data.tg_allow_chats || '';
+    
+    // Handle tg_channels JSON
+    if (res.data.tg_channels) {
+      try {
+        tgChannels.value = JSON.parse(res.data.tg_channels);
+      } catch (e) {
+        console.error("Failed to parse tg_channels:", e);
+        tgChannels.value = [];
+      }
+    } else if (res.data.tg_channel_id) {
+      // Compatibility for old single channel
+      tgChannels.value = [{ id: res.data.tg_channel_id, enabled: true, concise: false }];
+    }
+    
     formState.p115_cookie = res.data.p115_cookie || '';
     formState.p115_save_dir = res.data.p115_save_dir || '';
     formState.p115_cleanup_dir_cron = res.data.p115_cleanup_dir_cron || '';
@@ -205,24 +263,36 @@ const loadConfig = async () => {
 
 const onFinish = async (section: 'tg' | 'p115' | 'proxy' = 'tg') => {
   try {
-    // Define which fields belong to which section
     const sectionFields: Record<string, string[]> = {
-      tg: ['tg_bot_token', 'tg_channel_id', 'tg_user_id', 'tg_allow_chats'],
+      tg: ['tg_bot_token', 'tg_user_id', 'tg_allow_chats'],
       p115: ['p115_cookie', 'p115_save_dir', 'p115_cleanup_dir_cron', 'p115_cleanup_trash_cron', 'p115_recycle_password'],
       proxy: ['proxy_enabled', 'proxy_host', 'proxy_port', 'proxy_user', 'proxy_pass', 'proxy_type']
     };
 
-    // Validate only related fields if possible (or just validate all for simplicity, 
-    // but only send the relevant ones)
     await formRef.value.validate(sectionFields[section]!);
     
     loading.value = true;
-    
-    // Create a dynamic payload containing ONLY the fields for this section
     const payload: Record<string, any> = {};
     sectionFields[section]!.forEach(field => {
       payload[field] = (formState as any)[field];
     });
+    
+    if (section === 'tg') {
+      // Validate that all channels have an ID
+      const hasEmptyId = tgChannels.value.some(c => !c.id.trim());
+      if (hasEmptyId) {
+        message.warning('请先填写 Channel ID，或删除不需要的频道');
+        return;
+      }
+
+      // Filter out empty channel IDs and stringify
+      const filteredChannels = tgChannels.value.filter(c => c.id.trim() !== '');
+      payload.tg_channels = JSON.stringify(filteredChannels);
+      // We still update tg_channel_id for robustness if it's there
+      if (filteredChannels.length > 0) {
+        payload.tg_channel_id = (filteredChannels[0] as ChannelConfig).id;
+      }
+    }
 
     const res = await axios.post('/api/config/update', payload);
     message.success(section === 'tg' ? 'Telegram 配置已保存' : section === 'p115' ? '115 网盘配置已保存' : '代理配置已保存');
@@ -280,3 +350,25 @@ const detectProtocol = async () => {
 
 onMounted(loadConfig);
 </script>
+
+<style scoped>
+.channel-item {
+  background: #fafafa;
+  padding: 12px;
+  border-radius: 8px;
+  margin-bottom: 12px;
+  border: 1px solid #f0f0f0;
+  transition: all 0.3s;
+}
+
+.channel-item:hover {
+  border-color: #40a9ff;
+}
+</style>
+
+<style>
+.dark .channel-item {
+  background: #1f1f1f !important;
+  border: 1px solid #303030 !important;
+}
+</style>

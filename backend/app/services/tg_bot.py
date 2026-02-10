@@ -81,8 +81,6 @@ class TGService:
                     logger.debug(f"{prefix} Webhook 删除失败 (非致命): {ex}")
 
                 # 2. 直接关闭 HTTP 会话 (强制断开所有 TCP 连接)
-                #    注意：不调用 bot.close()，那是 Telegram Bot API 的 /close 端点，
-                #    用于关闭本地 Bot API Server，不是关闭客户端连接
                 if hasattr(target_bot, 'session') and target_bot.session:
                     try:
                         logger.debug(f"{prefix} 正在强制关闭 HTTP 会话...")
@@ -159,8 +157,6 @@ class TGService:
         # Extract URLs from entities (hyperlinks)
         entity_urls = []
         for entity in entities:
-            # text_link: [文字](URL) format
-            # url: plain URL in text
             if entity.type == "text_link" and hasattr(entity, 'url'):
                 entity_urls.append(entity.url)
                 logger.debug(f"🔗 从 text_link 实体提取到 URL: {entity.url}")
@@ -196,11 +192,11 @@ class TGService:
         if share_url:
             logger.info(f"🎯 开始处理来自 {message.chat.id} 的 115 链接: {share_url}")
             
-            # Extract description (text before the link in full_text)
+            # Extract description
             description = ""
-            if match:  # If found in text
+            if match:
                 description = full_text[:match.start()].strip()
-            else:  # If from entity, use all text except the link placeholder
+            else:
                 description = full_text.strip()
             
             logger.debug(f"📝 提取的描述: {description[:100]}...")
@@ -209,71 +205,32 @@ class TGService:
             
             # 0. Check history first
             history_share_link = await p115_service.get_history_link(share_url)
-            if history_share_link:
-                logger.info(f"✨ 发现历史记录，直接使用缓存链接: {share_url} -> {history_share_link}")
-                await status_msg.edit_text("⚡ 发现历史记录，正在秒传...")
-                
-                # Replace link in text
-                new_text, new_entities = self._replace_text_and_adjust_entities(
-                    full_text, entities, share_url, history_share_link
-                )
-                
-                # Update access codes
-                new_text, new_entities = self._update_access_codes(new_text, new_entities, history_share_link)
-
-                # Post to channel
-                if settings.TG_CHANNEL_ID:
-                    try:
-                        if photo:
-                            # Caption limit is 1024 UTF-16 code units
-                            max_len_utf16 = 1024
-                            current_len_utf16 = self._get_utf16_len(new_text)
-                            if current_len_utf16 > max_len_utf16:
-                                # UTF-16 aware truncation
-                                new_text_encoded = new_text.encode('utf-16-le')
-                                new_text = new_text_encoded[:max_len_utf16 * 2].decode('utf-16-le', errors='ignore')
-                                
-                                # Filter entities
-                                if new_entities:
-                                    final_len_utf16 = self._get_utf16_len(new_text)
-                                    valid_entities = []
-                                    for e in new_entities:
-                                        if e.offset < final_len_utf16:
-                                            if e.offset + e.length > final_len_utf16:
-                                                e.length = final_len_utf16 - e.offset
-                                            valid_entities.append(e)
-                                    new_entities = valid_entities
-
-                            await self.bot.send_photo(
-                                settings.TG_CHANNEL_ID,
-                                photo=photo.file_id, # Changed from photo_id to photo.file_id
-                                caption=new_text,
-                                caption_entities=new_entities
-                            )
-                        else:
-                            await self.bot.send_message(
-                                settings.TG_CHANNEL_ID,
-                                text=new_text,
-                                entities=new_entities
-                            )
-                        logger.info(f"⚡ 已使用历史链接转发到频道")
-                    except Exception as e:
-                        logger.error(f"Failed to post history link to channel: {e}", exc_info=True)
-
-                await status_msg.edit_text(f"⚡ 秒传成功！(历史记录)\n长期分享链接：\n{history_share_link}")
-                return
             
-            # 1. Save link with metadata
-            # Convert entities to dicts for JSON serialization in DB
+            # Convert entities for JSON serialization
             ser_entities = []
             if entities:
                 for e in entities:
                     try:
                         ser_entities.append(e.model_dump())
                     except AttributeError:
-                        # Fallback for older aiogram or if model_dump not available
                         ser_entities.append(dict(e))
 
+            if history_share_link:
+                logger.info(f"✨ 发现历史记录，直接使用缓存链接: {share_url} -> {history_share_link}")
+                await status_msg.edit_text("⚡ 发现历史记录，正在秒传...")
+                
+                # Post to channels
+                await self.broadcast_to_channels(history_share_link, {
+                    "full_text": full_text,
+                    "entities": ser_entities,
+                    "photo_id": photo.file_id if photo else None,
+                    "share_url": share_url
+                })
+
+                await status_msg.edit_text(f"⚡ 秒传成功！(历史记录)\n长期分享链接：\n{history_share_link}")
+                return
+            
+            # 1. Save link with metadata
             metadata = {
                 "description": description,
                 "full_text": full_text,
@@ -293,55 +250,8 @@ class TGService:
                 if share_link:
                     await p115_service.save_history_link(share_url, share_link)
                 
-                # 3. Post to channel with rich format
-                if settings.TG_CHANNEL_ID and share_link:
-                    try:
-                        # Replace original link in text and adjust entities
-                        new_text, new_entities = self._replace_text_and_adjust_entities(
-                            full_text, entities, share_url, share_link
-                        )
-                        
-                        # Update access codes in text if present
-                        new_text, new_entities = self._update_access_codes(new_text, new_entities, share_link)
-                        
-                        if photo:
-                            # Caption limit is 1024 UTF-16 code units
-                            max_len_utf16 = 1024
-                            current_len_utf16 = self._get_utf16_len(new_text)
-                            if current_len_utf16 > max_len_utf16:
-                                # UTF-16 aware truncation
-                                new_text_encoded = new_text.encode('utf-16-le')
-                                new_text = new_text_encoded[:max_len_utf16 * 2].decode('utf-16-le', errors='ignore')
-                                
-                                # Filter entities
-                                if new_entities:
-                                    final_len_utf16 = self._get_utf16_len(new_text)
-                                    valid_entities = []
-                                    for e in new_entities:
-                                        if e.offset < final_len_utf16:
-                                            if e.offset + e.length > final_len_utf16:
-                                                e.length = final_len_utf16 - e.offset
-                                            valid_entities.append(e)
-                                    new_entities = valid_entities
-
-                            # Send photo with caption and entities
-                            await self.bot.send_photo(
-                                settings.TG_CHANNEL_ID,
-                                photo=photo.file_id,
-                                caption=new_text,
-                                caption_entities=new_entities
-                            )
-                            logger.info(f"📸 已转发图片消息到频道")
-                        else:
-                            # Send text message with entities
-                            await self.bot.send_message(
-                                settings.TG_CHANNEL_ID,
-                                text=new_text,
-                                entities=new_entities
-                            )
-                            logger.info(f"📝 已转发文本消息到频道")
-                    except Exception as e:
-                        logger.error(f"Failed to post to channel: {e}", exc_info=True)
+                # 3. Post to channels
+                await self.broadcast_to_channels(share_link, metadata)
 
                 # 4. Notify user if ID configured
                 if settings.TG_USER_ID:
@@ -367,7 +277,6 @@ class TGService:
             else:
                 await status_msg.edit_text("❌ 保存链接失败，请检查 Cookie 或链接有效性。")
         elif full_text.startswith("/"):
-             # Unknown command handled by default or ignored
              pass
         else:
             await message.answer("⚠️ 请发送有效的 115 分享链接。\n支持域名: 115.com, 115cdn.com, anxia.com")
@@ -389,7 +298,6 @@ class TGService:
                 logger.warning(f"⚠️ 无法获取检查状态，将在下次重试: {share_url}")
                 continue
             
-            # 链接已被判定为违规或已过期
             if status_info["is_prohibited"]:
                 logger.warning(f"🚫 轮询检测到链接包含违规内容: {share_url}")
                 await message.reply(f"🚫 链接审核未通过：检测到违规内容，无法继续处理。\n链接: {share_url}")
@@ -402,24 +310,18 @@ class TGService:
                 await self._delete_pending_task(pending_info.get("db_id"))
                 return
 
-            if not status_info["is_auditing"]:  # Audit passed (presumably status 1)
+            if not status_info["is_auditing"]:  # Audit passed
                 logger.info(f"🎉 链接审核已通过 (status: {status_info['share_state']}): {share_url}")
-                # Try saving again
                 save_res = await p115_service.save_share_link(share_url, metadata=metadata)
                 
                 if save_res and save_res.get("status") == "success":
                     logger.info(f"✅ 审核通过后转存成功: {share_url}")
-                    # Create long-term share
                     share_link = await p115_service.create_share_link(save_res)
                     
                     if share_link:
-                        # Save to history
                         await p115_service.save_history_link(share_url, share_link)
-
-                        # Broadcast to channel
-                        await self._post_to_channel(share_link, metadata)
+                        await self.broadcast_to_channels(share_link, metadata)
                         
-                        # Notify user
                         success_text = f"✅ 审核已通过！链接处理完成。\n原链接: {share_url}\n新分享: {share_link}"
                         await message.reply(success_text)
                         
@@ -429,7 +331,7 @@ class TGService:
                             except Exception:
                                 pass
                     await self._delete_pending_task(pending_info.get("db_id"))
-                    return  # Success, exit polling
+                    return 
                 else:
                     logger.error(f"❌ 审核通过后转存仍然失败: {share_url}")
                     await message.reply(f"❌ 链接审核已通过，但自动转存失败，请手动尝试: {share_url}")
@@ -440,75 +342,12 @@ class TGService:
         await message.reply(f"⏰ 链接审核轮询超时 (已持续 3 小时)，请稍后手动检查: {share_url}")
         await self._delete_pending_task(pending_info.get("db_id"))
 
-    async def _post_to_channel(self, share_link: str, metadata: dict):
-        """Helper to post processed link to channel"""
-        if not settings.TG_CHANNEL_ID:
-            return
-            
-        full_text = metadata.get("full_text", "")
-        photo_id = metadata.get("photo_id")
-        share_url = metadata.get("share_url", "")
-        entities = metadata.get("entities", [])
-        
-        try:
-            # Replace link and adjust entities if possible
-            if share_url:
-                new_text, new_entities = self._replace_text_and_adjust_entities(
-                    full_text, entities, share_url, share_link
-                )
-                
-                # Update access codes in text if present
-                new_text, new_entities = self._update_access_codes(new_text, new_entities, share_link)
-            else:
-                new_text = f"✅ 自动转存成功 (审核通过)\n\n{full_text}\n\n🔗 长期有效链接: {share_link}"
-                new_entities = None
-            
-            if photo_id:
-                # Caption limit is 1024 UTF-16 code units
-                max_len_utf16 = 1024
-                # Check if truncation is needed
-                current_len_utf16 = self._get_utf16_len(new_text)
-                if current_len_utf16 > max_len_utf16:
-                    # Perform UTF-16 aware truncation
-                    new_text_encoded = new_text.encode('utf-16-le')
-                    # Each UTF-16 code unit is 2 bytes
-                    new_text = new_text_encoded[:max_len_utf16 * 2].decode('utf-16-le', errors='ignore')
-                    
-                    # Filter entities that are now out of range
-                    if new_entities:
-                        final_len_utf16 = self._get_utf16_len(new_text)
-                        valid_entities = []
-                        for e in new_entities:
-                            if e.offset < final_len_utf16:
-                                # Adjust length if partially truncated
-                                if e.offset + e.length > final_len_utf16:
-                                    e.length = final_len_utf16 - e.offset
-                                valid_entities.append(e)
-                        new_entities = valid_entities
-
-                await self.bot.send_photo(
-                    settings.TG_CHANNEL_ID, 
-                    photo=photo_id, 
-                    caption=new_text,
-                    caption_entities=new_entities
-                )
-            else:
-                await self.bot.send_message(
-                    settings.TG_CHANNEL_ID, 
-                    text=new_text,
-                    entities=new_entities
-                )
-            logger.info("已将轮询成功的链接发送到频道")
-        except Exception as e:
-            logger.error(f"Failed to post to channel in background task: {e}")
-
     def _get_utf16_len(self, text: str) -> int:
-        """Calculate length in UTF-16 code units (as expected by Telegram)"""
+        """Calculate length in UTF-16 code units"""
         return len(text.encode('utf-16-le')) // 2
 
     def _update_access_codes(self, text: str, entities: list, share_link: str) -> tuple[str, list]:
-        """Update access codes in text (including URL-encoded ones) to match the new link"""
-        # 1. Extract new password from share link
+        """Update access codes in text to match the new link"""
         from urllib.parse import urlparse, parse_qs
         import re
         
@@ -519,12 +358,8 @@ class TGService:
         if not new_pwd:
             return text, entities
 
-        # 2. Define patterns
-        # Group 1: Prefix (e.g. "访问码："), Group 2: The code (4 chars)
         patterns = [
-            # Plain text: 访问码/提取码/密码 + : or ： + 4 chars
             r'((?:访问码|提取码|密码)(?:：|:|%EF%BC%9A|%3A)\s*)([a-zA-Z0-9]{4})',
-            # URL encoded: %E8%AE%BF%E9%97%AE%E7%A0%81 = 访问码, etc.
             r'((?:%E8%AE%BF%E9%97%AE%E7%A0%81|%E6%8F%90%E5%8F%96%E7%A0%81|%E5%AF%86%E7%A0%81)(?:%EF%BC%9A|%3A)(?:%20)*)([a-zA-Z0-9]{4})'
         ]
         
@@ -532,70 +367,36 @@ class TGService:
         current_entities = entities
         
         for pattern in patterns:
-            # We use an iterator loop to handle multiple occurrences and shifting offsets
             while True:
                 match = re.search(pattern, current_text, flags=re.IGNORECASE)
                 if not match:
                     break
                 
                 prefix, old_code = match.groups()
-                
-                # If code is already correct, skip this match to avoid infinite loop
-                # We move start pos check forward
                 if old_code == new_pwd:
-                    # Manually advance to avoid infinite loop if we don't replace
-                    # Since python re.search doesn't support 'start from', we use a trick or just break if we assume unique usage
-                    # (unlikely in one msg). Let's assume replace all occurrences if different.
-                    
-                    # Actually, if we have multiple "访问码：old" and "访问码：old", and we replace one, the next iteration catches the next.
-                    # If we find "访问码：new", we should look for others? 
-                    # Re.sub is risky with entities. We need separate `replace`.
-                    
-                    # If the found match is already new_pwd, we look for *other* matches
-                    # But re.search finds the first. If the first is already correct, we might miss subsequent incorrect ones.
-                    # Helper finding:
-                    next_pos = match.end()
-                    suffix = current_text[next_pos:]
-                    sub_match = re.search(pattern, suffix, flags=re.IGNORECASE)
-                    if sub_match:
-                         # There is another match after this one, we might need to handle it.
-                         # But `_replace_text_and_adjust_entities` replaces specific substrings.
-                         # Let's simplify: replace specific substring "prefix+old_code" -> "prefix+new_pwd"
-                         pass
                     break 
 
                 old_str = f"{prefix}{old_code}"
                 new_str = f"{prefix}{new_pwd}"
-                
-                # Use our entity-aware replacer
-                # Note: this replaces ALL occurrences of old_str. 
-                # This is generally desired.
                 current_text, current_entities = self._replace_text_and_adjust_entities(
                     current_text, current_entities, old_str, new_str
                 )
-                
-                # If we replaced, the text changed. Loop again to find other patterns or same pattern again if somehow multiple different old codes existed
-                # (unlikely but safe to loop)
-                
         return current_text, current_entities
 
     def _replace_text_and_adjust_entities(self, text: str, entities: list, old_str: str, new_str: str):
-        """Helper to replace text and shift entity offsets/lengths accordingly using UTF-16 offsets"""
+        """Helper to replace text and shift entity offsets/lengths accordingly"""
         has_text_match = old_str in text
         
-        # We must calculate offsets in UTF-16 units for Telegram compatibility
         if has_text_match:
             start_pos_char = text.find(old_str)
             end_pos_char = start_pos_char + len(old_str)
             
-            # UTF-16 offsets and lengths
             start_pos_u16 = self._get_utf16_len(text[:start_pos_char])
             old_len_u16 = self._get_utf16_len(old_str)
             end_pos_u16 = start_pos_u16 + old_len_u16
             new_len_u16 = self._get_utf16_len(new_str)
             diff_u16 = new_len_u16 - old_len_u16
             
-            # New text
             new_text = text[:start_pos_char] + new_str + text[end_pos_char:]
         else:
             new_text = text
@@ -605,31 +406,24 @@ class TGService:
             new_len_u16 = self._get_utf16_len(new_str)
             diff_u16 = new_len_u16 - old_len_u16
 
-        # 2. Adjusted entities
         new_entities = []
         if entities:
             from aiogram.types import MessageEntity
             for entity in entities:
-                # Handle both MessageEntity objects and dictionaries (from DB)
                 is_dict = isinstance(entity, dict)
                 e_offset = entity.get("offset") if is_dict else entity.offset
                 e_length = entity.get("length") if is_dict else entity.length
                 e_url = (entity.get("url") if is_dict else getattr(entity, "url", None))
                 e_type = entity.get("type") if is_dict else entity.type
                 
-                # Update offset/length based on UTF-16 units
                 if has_text_match:
                     if e_offset >= end_pos_u16:
-                        # Entity starts after the replacement
                         e_offset += diff_u16
                     elif e_offset <= start_pos_u16 and (e_offset + e_length) >= end_pos_u16:
-                        # Entity wraps the replacement
                         e_length += diff_u16
                     elif e_offset == start_pos_u16 and e_length == old_len_u16:
-                        # Entity is the replacement string itself
                         e_length = new_len_u16
                 
-                # Update URL if it's the target link (Crucial for text_link)
                 if e_url == old_str:
                     e_url = new_str
 
@@ -642,11 +436,102 @@ class TGService:
                     language=entity.get("language") if is_dict else getattr(entity, "language", None),
                     custom_emoji_id=entity.get("custom_emoji_id") if is_dict else getattr(entity, "custom_emoji_id", None)
                 ))
-        
         return new_text, new_entities
 
+    async def broadcast_to_channels(self, share_link: str, metadata: dict):
+        """Broadcast processed link to all configured and enabled channels"""
+        import json
+        channels = []
+        try:
+            channels = json.loads(settings.TG_CHANNELS)
+        except Exception:
+            pass
+            
+        legacy_id = settings.TG_CHANNEL_ID
+        if legacy_id and not any(c.get("id") == str(legacy_id) for c in channels):
+            channels.append({"id": str(legacy_id), "enabled": True, "concise": False})
+            
+        enabled_channels = [c for c in channels if c.get("enabled")]
+        
+        if not enabled_channels:
+            logger.debug("没有已配置或已启用的频道，跳过广播")
+            return
+            
+        for chan in enabled_channels:
+            await self._post_to_single_channel(chan, share_link, metadata)
+
+    async def _post_to_single_channel(self, channel_config: dict, share_link: str, metadata: dict):
+        """Helper to post to a single channel based on its configuration"""
+        channel_id = channel_config.get("id")
+        is_concise = channel_config.get("concise", False)
+        
+        if not channel_id:
+            return
+            
+        full_text = metadata.get("full_text", "")
+        photo_id = metadata.get("photo_id")
+        share_url = metadata.get("share_url", "")
+        entities_raw = metadata.get("entities", [])
+        
+        from aiogram.types import MessageEntity
+        entities = []
+        for e in entities_raw:
+            if isinstance(e, dict):
+                try:
+                    entities.append(MessageEntity(**e))
+                except Exception:
+                    pass
+            else:
+                entities.append(e)
+
+        try:
+            if is_concise:
+                new_text = f"✅ 处理成功！\n长期分享链接：\n{share_link}"
+                new_entities = None
+            else:
+                if share_url:
+                    new_text, new_entities = self._replace_text_and_adjust_entities(
+                        full_text, entities, share_url, share_link
+                    )
+                    new_text, new_entities = self._update_access_codes(new_text, new_entities, share_link)
+                else:
+                    new_text = f"✅ 自动转存成功\n\n{full_text}\n\n🔗 长期有效链接: {share_link}"
+                    new_entities = None
+
+            if photo_id and not is_concise:
+                max_len_utf16 = 1024
+                current_len_utf16 = self._get_utf16_len(new_text)
+                if current_len_utf16 > max_len_utf16:
+                    new_text_encoded = new_text.encode('utf-16-le')
+                    new_text = new_text_encoded[:max_len_utf16 * 2].decode('utf-16-le', errors='ignore')
+                    if new_entities:
+                        final_len_utf16 = self._get_utf16_len(new_text)
+                        valid_entities = []
+                        for e in new_entities:
+                            if e.offset < final_len_utf16:
+                                if e.offset + e.length > final_len_utf16:
+                                    e.length = final_len_utf16 - e.offset
+                                valid_entities.append(e)
+                        new_entities = valid_entities
+
+                await self.bot.send_photo(
+                    channel_id, 
+                    photo=photo_id, 
+                    caption=new_text,
+                    caption_entities=new_entities
+                )
+            else:
+                await self.bot.send_message(
+                    channel_id, 
+                    text=new_text,
+                    entities=new_entities,
+                    disable_web_page_preview=False
+                )
+            logger.info(f"已将推送发送至频道: {channel_id} (简洁: {is_concise})")
+        except Exception as e:
+            logger.error(f"Failed to post to channel {channel_id}: {e}")
+
     async def _delete_pending_task(self, db_id: int):
-        """Delete task from DB"""
         if db_id:
             from app.core.database import async_session
             from app.models.schema import PendingLink
@@ -654,51 +539,35 @@ class TGService:
             async with async_session() as session:
                 await session.execute(delete(PendingLink).where(PendingLink.id == db_id))
                 await session.commit()
-                logger.debug(f"🗑 已从数据库删除任务 ID: {db_id}")
 
     async def recover_pending_tasks(self):
-        """Recover pending polling tasks from DB on startup"""
         from app.core.database import async_session
         from app.models.schema import PendingLink
         from sqlalchemy import select
-        
         async with async_session() as session:
             result = await session.execute(select(PendingLink).where(PendingLink.status == "auditing"))
             tasks = result.scalars().all()
-            
             if tasks:
-                logger.info(f"♻️ 发现 {len(tasks)} 个未完成的审核任务，正在恢复轮询...")
                 for task in tasks:
-                    pending_info = {
-                        "share_url": task.share_url,
-                        "metadata": task.metadata_json,
-                        "db_id": task.id
-                    }
+                    pending_info = {"share_url": task.share_url, "metadata": task.metadata_json, "db_id": task.id}
                     asyncio.create_task(self._recovered_poll(pending_info))
 
     async def _recovered_poll(self, pending_info: dict):
-        """Polling logic for recovered tasks (no original message object)"""
         class MockMessage:
             def __init__(self, bot, user_id):
                 self.bot = bot
                 self.chat = type('obj', (object,), {'id': user_id})
-                
             async def reply(self, text):
-                try:
-                    await self.bot.send_message(self.chat.id, text)
-                except Exception:
-                    pass
-        
+                try: await self.bot.send_message(self.chat.id, text)
+                except Exception: pass
         user_id = settings.TG_USER_ID or "0"
         mock_msg = MockMessage(self.bot, user_id)
         await self.poll_pending_link(mock_msg, pending_info)
 
     async def verify_connection(self) -> bool:
-        """Verify the bot token connection with Telegram"""
         if not self.bot:
             self.is_connected = False
             return False
-            
         try:
             me = await self.bot.get_me()
             if me:
@@ -706,165 +575,57 @@ class TGService:
                 logger.info(f"✅ Telegram Bot 连接验证成功: @{me.username}")
                 return True
         except Exception as e:
-            err_msg = str(e)
-            if any(x in err_msg for x in ["ProxyConnectionError", "Timeout", "Cannot connect", "远程计算机拒绝"]):
-                logger.warning(f"⚠️ Telegram Bot 连接验证未通过 (网络/代理问题): {err_msg}")
-            else:
-                logger.error(f"❌ Telegram Bot 连接验证失败: {e}")
             self.is_connected = False
             return False
-        
         self.is_connected = False
         return False
 
     async def start_polling(self):
         if self.dp and self.bot:
             self._current_polling_id += 1
-            p_id = self._current_polling_id
-            prefix = f"[Polling-ID:{p_id}]"
             try:
-                logger.info(f"{prefix} 🚀 正在启动轮询 (跳过历史累积消息: True)...")
-                # Using skip_updates=True to avoid processing old messages after restart
-                await self.dp.start_polling(
-                    self.bot, 
-                    skip_updates=True, 
-                    handle_signals=False,
-                )
-            except asyncio.CancelledError:
-                logger.info(f"{prefix} 🛑 轮询任务被主动取消 (正常流程)")
-                raise
+                await self.dp.start_polling(self.bot, skip_updates=True, handle_signals=False)
             except Exception as e:
-                err_msg = str(e)
-                # Filter out verbose stack traces for common network/proxy issues
-                if any(x in err_msg for x in ["ProxyConnectionError", "Timeout", "Cannot connect", "远程计算机拒绝"]):
-                    logger.warning(f"{prefix} ⚠️ 轮询由于网络/代理问题中断: {err_msg}")
-                else:
-                    logger.error(f"{prefix} ❌ 发生意外报错: {e}")
-                    import traceback
-                    logger.debug(traceback.format_exc())
-            finally:
-                logger.debug(f"{prefix} 🏁 轮询任务生命周期结束")
+                logger.error(f"Polling error: {e}")
 
     async def stop_polling(self):
-        """Stop current polling task gracefully, then force-cancel if needed"""
-        # 1. 先通知 Dispatcher 优雅停止 (它会结束当前 getUpdates 请求后退出循环)
         if self.dp:
-            try:
-                await self.dp.stop_polling()
-                logger.debug("Dispatcher 已收到停止信号")
-            except Exception as e:
-                logger.debug(f"Dispatcher stop_polling 调用异常 (非致命): {e}")
-        
-        # 2. 等待轮询任务自然结束，超时后强制取消
+            try: await self.dp.stop_polling()
+            except Exception: pass
         if self.polling_task and not self.polling_task.done():
-            try:
-                # 给 3 秒时间让 dispatcher 优雅退出
-                await asyncio.wait_for(asyncio.shield(self.polling_task), timeout=3.0)
-                logger.info("✅ Telegram Bot polling 已优雅停止")
+            try: await asyncio.wait_for(asyncio.shield(self.polling_task), timeout=3.0)
             except asyncio.TimeoutError:
-                # 优雅停止超时，强制取消
-                logger.debug("优雅停止超时，强制取消 polling task...")
                 self.polling_task.cancel()
-                try:
-                    await self.polling_task
-                except (asyncio.CancelledError, Exception):
-                    pass
-                logger.info("✅ Telegram Bot polling 已强制停止")
-            except (asyncio.CancelledError, Exception) as e:
-                logger.debug(f"等待 polling 结束时出错: {e}")
+                try: await self.polling_task
+                except: pass
             self.polling_task = None
 
     async def restart_polling(self):
-        """Restart polling with updated configuration, ensuring no conflicts"""
-        logger.debug(f"尝试进入重启原子锁... (当前 ID: {self._current_polling_id})")
         async with self._lock:
-            logger.info("🔄 Telegram Bot 正在开始安全重启流程...")
-            
-            # 1. Stop current polling task
             await self.stop_polling()
-            
-            # 2. Cleanup old bot instance (session, tasks, etc.)
             await self._cleanup_bot()
-            
-            # 3. Wait for old connections to fully time out on Telegram side
-            logger.debug("⏳ 正在等待 Telegram 服务器刷新连接状态 (5s)...")
             await asyncio.sleep(5)
-            
-            # 4. Initialize new bot with current settings
-            if not settings.TG_BOT_TOKEN:
-                logger.warning("⚠️ 未配置 Bot Token，跳过启动")
-                return
-            
-            logger.debug("正在重新初始化 Bot 实例...")
+            if not settings.TG_BOT_TOKEN: return
             self.init_bot(settings.TG_BOT_TOKEN)
-            if not self.bot or not self.dp:
-                logger.error("❌ Telegram Bot 重新初始化失败")
-                return
-            
-            # 5. 用新 Bot (有正确连接) 主动抢占 Telegram 服务器端的 getUpdates 位
-            #    这是解决 ConflictError 的关键：旧 Bot 的代理坏了无法通知 Telegram 断开，
-            #    但新 Bot 发送 getUpdates 可以让 Telegram 主动踢掉旧的长轮询连接
-            try:
-                logger.debug("新 Bot 正在清除 Telegram 服务端残留状态...")
-                await asyncio.wait_for(
-                    self.bot.delete_webhook(drop_pending_updates=True), 
-                    timeout=10.0
-                )
-                logger.debug("✅ Webhook 已清除")
-            except Exception as e:
-                logger.warning(f"新 Bot 清除 webhook 失败: {e}")
-            
-            # 6. 用 getUpdates(offset=-1, timeout=0) 抢占轮询位
-            #    timeout=0 表示立即返回，不建立新的长轮询
-            #    这会让 Telegram 断开任何现存的旧 getUpdates 长连接
-            for attempt in range(3):
-                try:
-                    await asyncio.wait_for(
-                        self.bot.get_updates(offset=-1, timeout=0),
-                        timeout=10.0
-                    )
-                    logger.debug(f"✅ getUpdates 抢占成功 (第 {attempt+1} 次)")
-                    break
-                except Exception as e:
-                    logger.debug(f"getUpdates 抢占第 {attempt+1} 次失败: {e}")
-                    if attempt < 2:
-                        await asyncio.sleep(2)
-            
-            # 7. 等待 Telegram 服务器彻底释放旧连接
+            if not self.bot: return
+            try: await self.bot.delete_webhook(drop_pending_updates=True)
+            except: pass
             await asyncio.sleep(2)
             self.polling_task = asyncio.create_task(self.start_polling())
-            logger.info("✅ Telegram Bot 轮询已重启，运行正常")
 
     async def test_send_to_user(self):
-        if not self.bot or not settings.TG_USER_ID:
-            logger.warning("Bot or User ID not configured for test")
-            return False, "机器人或用户 ID 未配置"
+        if not self.bot or not settings.TG_USER_ID: return False, "未配置"
         try:
-            await self.bot.send_message(settings.TG_USER_ID, "🔔 P115-Share 机器人测试通知成功！")
-            logger.info(f"✅ 已向用户 {settings.TG_USER_ID} 发送测试消息")
-            self.is_connected = True # Test success implies connected
-            return True, "测试消息已模拟发送"
-        except Exception as e:
-            logger.error(f"❌ 向用户发送测试消息失败: {e}")
-            self.is_connected = False # Test failed potentially implies connection issue
-            err_msg = str(e)
-            if "Timeout" in err_msg or "ConnectorError" in err_msg or "信号灯超时时间已到" in err_msg or "Cannot connect to host" in err_msg:
-                return False, "测试连接失败，请检查网络环境"
-            return False, err_msg
+            await self.bot.send_message(settings.TG_USER_ID, "🔔 测试成功")
+            return True, "成功"
+        except Exception as e: return False, str(e)
 
-    async def test_send_to_channel(self):
-        if not self.bot or not settings.TG_CHANNEL_ID:
-            logger.warning("Bot or Channel ID not configured for test")
-            return False, "机器人或频道 ID 未配置"
+    async def test_send_to_channel(self, channel_id: str = None):
+        target_id = channel_id or settings.TG_CHANNEL_ID
+        if not self.bot or not target_id: return False, "未配置"
         try:
-            await self.bot.send_message(settings.TG_CHANNEL_ID, "📢 P115-Share 频道广播测试成功！")
-            logger.info(f"✅ 已向频道 {settings.TG_CHANNEL_ID} 发送测试消息")
-            return True, "测试消息已模拟发送"
-        except Exception as e:
-            logger.error(f"❌ 向频道发送测试消息失败: {e}")
-            err_msg = str(e)
-            if "Timeout" in err_msg or "ConnectorError" in err_msg or "信号灯超时时间已到" in err_msg or "Cannot connect to host" in err_msg:
-                return False, "测试连接失败，请检查网络环境"
-            return False, err_msg
+            await self.bot.send_message(target_id, "📢 测试成功")
+            return True, "成功"
+        except Exception as e: return False, str(e)
 
 tg_service = TGService()

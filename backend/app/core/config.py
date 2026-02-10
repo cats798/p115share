@@ -13,6 +13,7 @@ class Settings(BaseSettings):
     TG_CHANNEL_ID: str = ""
     TG_USER_ID: str = ""
     TG_ALLOW_CHATS: str = "" # Comma separated list of IDs
+    TG_CHANNELS: str = "[]"  # JSON list of {id, enabled, concise}
     
     # 115
     P115_COOKIE: str = ""

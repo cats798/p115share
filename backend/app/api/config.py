@@ -18,6 +18,7 @@ class ConfigUpdate(BaseModel):
     tg_channel_id: Optional[str] = None
     tg_user_id: Optional[str] = None
     tg_allow_chats: Optional[str] = None
+    tg_channels: Optional[str] = None
     p115_cookie: Optional[str] = None
     p115_save_dir: Optional[str] = None
     p115_cleanup_dir_cron: Optional[str] = None
@@ -63,6 +64,8 @@ async def update_config(cfg: ConfigUpdate, user=Depends(get_current_user)):
         await settings.save_setting("TG_USER_ID", cfg.tg_user_id)
     if "tg_allow_chats" in update_data:
         await settings.save_setting("TG_ALLOW_CHATS", cfg.tg_allow_chats)
+    if "tg_channels" in update_data:
+        await settings.save_setting("TG_CHANNELS", cfg.tg_channels)
     
     # 2. Update 115 settings
     if "p115_cookie" in update_data and settings.P115_COOKIE != cfg.p115_cookie:
@@ -118,6 +121,7 @@ async def get_config(user=Depends(get_current_user)):
         "tg_channel_id": settings.TG_CHANNEL_ID,
         "tg_user_id": settings.TG_USER_ID,
         "tg_allow_chats": settings.TG_ALLOW_CHATS,
+        "tg_channels": settings.TG_CHANNELS,
         "p115_cookie": settings.P115_COOKIE,
         "p115_logged_in": p115_service.is_connected,
         "p115_save_dir": settings.P115_SAVE_DIR,
@@ -210,8 +214,38 @@ async def test_bot(user=Depends(get_current_user)):
 @router.post("/test-channel")
 async def test_channel(user=Depends(get_current_user)):
     logger.info("🛠 用户触发了频道广播测试")
-    success, msg = await tg_service.test_send_to_channel()
-    return {"status": "success" if success else "error", "message": msg}
+    import json
+    channels = []
+    try:
+        channels = json.loads(settings.TG_CHANNELS)
+    except Exception:
+        pass
+    
+    # Also include the legacy channel ID if it exists and not in the list
+    legacy_id = settings.TG_CHANNEL_ID
+    if legacy_id and not any(c.get("id") == legacy_id for c in channels):
+        channels.append({"id": legacy_id, "enabled": True, "concise": False})
+    
+    enabled_channels = [c for c in channels if c.get("enabled")]
+    
+    if not enabled_channels:
+        return {"status": "error", "message": "未配置或未启用任何频道"}
+    
+    results = []
+    for chan in enabled_channels:
+        success, msg = await tg_service.test_send_to_channel(chan.get("id"))
+        results.append({"id": chan.get("id"), "success": success, "message": msg})
+    
+    all_success = all(r["success"] for r in results)
+    final_msg = "所有频道测试成功" if all_success else "部分频道测试失败"
+    if len(results) == 1:
+        final_msg = results[0]["message"]
+        
+    return {
+        "status": "success" if all_success else "error", 
+        "message": final_msg,
+        "details": results
+    }
 
 @router.post("/cleanup-save-dir")
 async def cleanup_save_dir(user=Depends(get_current_user)):
