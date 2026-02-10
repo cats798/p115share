@@ -164,7 +164,7 @@ class TGService:
                 entity_urls.append(url)
         
         # 115 Link Detection (Regex)
-        link_pattern = r'https?://(?:115\.com|115cdn\.com|anxia\.com)/s/[a-zA-Z0-9]+(?:\?password=[a-zA-Z0-9]+)?'
+        link_pattern = r'https?://(?:115\.com|115cdn\.com|anxia\.com)/s/[a-zA-Z0-9]+(?:[\?#][^ \s\n\r"\'<>]+)?'
         
         # Extract links from text and entity URLs
         text_links = re.findall(link_pattern, full_text)
@@ -259,14 +259,21 @@ class TGService:
             else:
                 failed_count += 1
         
-        if total_links == 1 and success_count == 1:
-            # For single successful link, delete the processing status message to reduce clutter
-            try:
-                await status_msg.delete()
-            except Exception:
-                pass
+        if total_links == 1:
+            if success_count == 1:
+                # For single successful link, delete the processing status message to reduce clutter
+                try:
+                    await status_msg.delete()
+                except Exception:
+                    pass
+            elif pending_count == 1:
+                # For single auditing link, use a more friendly message
+                await status_msg.edit_text("🔍 分享链接正在审核中，将在审核通过后，进行保存分享处理")
+            else:
+                # For single failed link
+                await status_msg.edit_text(f"❌ 处理完成，但链接处理失败。\n\n成功: 0\n❌ 失败: 1")
         else:
-            # Final notification for batch or failures
+            # Final notification for batch
             result_text = f"✅ 批量处理完成！\n\n成功: {success_count}\n"
             if pending_count:
                 result_text += f"⏳ 审核中 (转换后自动发布): {pending_count}\n"
