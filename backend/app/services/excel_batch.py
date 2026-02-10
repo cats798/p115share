@@ -97,8 +97,10 @@ class ExcelBatchService:
                     task = result.scalar_one_or_none()
                 
                 if not task:
-                    await asyncio.sleep(5)
-                    continue
+                    # No running task found, exit worker instead of polling
+                    logger.info("Excel 批量转存服务工作线程退出（无运行中的任务）")
+                    self.worker_task = None
+                    break
                 
                 self.active_task_id = task.id
                 

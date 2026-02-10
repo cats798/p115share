@@ -107,9 +107,8 @@ async def lifespan(app: FastAPI):
     from app.services.scheduler import cleanup_scheduler
     cleanup_scheduler.start()
     
-    # Start Excel Batch worker
-    from app.services.excel_batch import excel_batch_service
-    await excel_batch_service.start_worker()
+    # Excel Batch worker will start on-demand when user starts a task
+    # No need to start it here
     
     yield
     

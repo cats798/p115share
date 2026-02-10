@@ -200,7 +200,7 @@ class TGService:
 
         processed_links = {} # {original_url: share_link}
         
-        async def process_single_link(share_url, index):
+        async def process_single_link(share_url, index, segment_info=None):
             try:
                 # 0. Check history first
                 history_share_link = await p115_service.get_history_link(share_url)
@@ -208,15 +208,16 @@ class TGService:
                 if history_share_link:
                     logger.info(f"✨ [{index}/{total_links}] 发现历史记录: {share_url}")
                     processed_links[share_url] = history_share_link
-                    return True
+                    return True, history_share_link
 
                 # 1. Save link with metadata
+                # Use segmented metadata if available
                 metadata = {
                     "description": full_text.strip(),
-                    "full_text": full_text,
-                    "photo_id": photo.file_id if photo else None,
+                    "full_text": segment_info["text"] if segment_info else full_text,
+                    "photo_id": segment_info["photo_id"] if segment_info else (photo.file_id if photo else None),
                     "share_url": share_url,
-                    "entities": ser_entities
+                    "entities": segment_info["entities"] if segment_info else ser_entities
                 }
                 save_res = await p115_service.save_share_link(share_url, metadata=metadata)
                 
@@ -227,37 +228,132 @@ class TGService:
                         if share_link:
                             await p115_service.save_history_link(share_url, share_link)
                             processed_links[share_url] = share_link
-                            # Send detailed success messages requested by user
+                            # Send detailed success messages to sender
                             await message.reply(f"✅ 处理成功！\n长期分享链接：\n{share_link}")
                             await message.reply(f"🔔 链接保存成功！\n原链接: {share_url}\n新分享: {share_link}")
-                            return True
+                            return True, share_link
                     elif save_res.get("status") == "pending":
                         # Audit handled by the polling logic (consistent with current design)
                         logger.info(f"🔍 分享链接正在审核中: {share_url}")
                         asyncio.create_task(self.poll_pending_link(message, save_res))
-                        return "pending"
+                        return "pending", None
+                    elif save_res.get("status") == "error":
+                        return save_res, None
                 
-                return False
+                # Generic failure without specific error info
+                return {"error_type": "unknown", "message": "处理失败"}, None
             except Exception as e:
                 logger.error(f"❌ 处理链接出错 {share_url}: {e}")
-                return False
+                return {"error_type": "exception", "message": str(e)}, None
+
+        # Prepare segments for broadcasting
+        # We find the positions of all share URLs in the original text (UTF-16)
+        text_utf16_len = self._get_utf16_len(full_text)
+        link_positions = [] # [(start_u16, end_u16, url)]
+        
+        # Search for each URL's position to define segment boundaries
+        for url in share_urls:
+            start_char = full_text.find(url)
+            if start_char != -1:
+                start_u16 = self._get_utf16_len(full_text[:start_char])
+                end_char = start_char + len(url)
+                end_u16 = start_u16 + self._get_utf16_len(url)
+                link_positions.append((start_u16, end_u16, url))
+        
+        # Sort by start position
+        link_positions.sort()
+        
+        # Smart segmentation: Find appropriate boundaries that work for both scenarios:
+        # - Title before link: "title\nlink\n\ntitle2\nlink2"
+        # - Title after link: "link\ntitle\n\nlink2\ntitle2"
+        # Strategy: Segment from last boundary to current link, then extend to a natural break point.
+        
+        last_boundary = 0
+        segments = [] # List of (segmented_text, segmented_entities, target_url)
+        for idx, pos in enumerate(link_positions):
+            start_u16, end_u16, url = pos
+            
+            # Default: end at current link's end (works for title-before-link)
+            seg_end = end_u16
+            
+            # For non-last links, try to find a better boundary
+            if idx < len(link_positions) - 1:
+                next_start_u16 = link_positions[idx + 1][0]
+                # Get text between current link end and next link start
+                between_start_char = len(full_text.encode('utf-16-le')[:end_u16*2].decode('utf-16-le', errors='ignore'))
+                between_end_char = len(full_text.encode('utf-16-le')[:next_start_u16*2].decode('utf-16-le', errors='ignore'))
+                between_text = full_text[between_start_char:between_end_char]
+                
+                # Look for double newline as a natural separator
+                double_newline_pos = between_text.find('\n\n')
+                if double_newline_pos != -1:
+                    # Found a paragraph break, split there
+                    split_char = between_start_char + double_newline_pos + 2  # +2 to include the \n\n
+                    seg_end = self._get_utf16_len(full_text[:split_char])
+                else:
+                    # No clear separator; use a heuristic
+                    # If there's significant content after the link, include some of it
+                    if len(between_text.strip()) > 10:
+                        # Likely title-after-link scenario, extend to next link start
+                        seg_end = next_start_u16
+                    # Otherwise keep seg_end = end_u16 (title-before-link)
+            else:
+                # Last link: extend to end of text
+                seg_end = text_utf16_len
+            
+            slice_text, slice_entities = self._slice_message(full_text, ser_entities, last_boundary, seg_end)
+            segments.append({
+                "text": slice_text,
+                "entities": slice_entities,
+                "url": url,
+                "photo_id": photo.file_id if photo else None
+            })
+            last_boundary = seg_end
 
         # Process links sequentially
         success_count = 0
         pending_count = 0
         failed_count = 0
+        failed_details = []  # Store failed link details: [(url, error_msg)]
         
+        last_res = None
         for i, url in enumerate(share_urls, 1):
             if total_links > 1:
                 await status_msg.edit_text(f"⏳ 正在处理第 {i}/{total_links} 个链接...")
             
-            res = await process_single_link(url, i)
+            # Find the segment for this specific URL
+            target_segment = next((s for s in segments if s["url"] == url), None)
+            
+            res, share_link = await process_single_link(url, i, target_segment)
+            last_res = res
+
             if res is True:
                 success_count += 1
+                # Broadcast this segment IMMEDIATELY
+                if target_segment:
+                    await self.broadcast_to_channels(
+                        {url: share_link}, 
+                        {
+                            "full_text": target_segment["text"],
+                            "entities": target_segment["entities"],
+                            "photo_id": target_segment["photo_id"]
+                        }
+                    )
             elif res == "pending":
                 pending_count += 1
             else:
                 failed_count += 1
+                # Record failure details
+                error_msg = "未知错误"
+                if isinstance(res, dict):
+                    err_type = res.get("error_type")
+                    if err_type == "expired":
+                        error_msg = "链接已过期"
+                    elif err_type == "violated":
+                        error_msg = "包含违规内容"
+                    elif res.get("message"):
+                        error_msg = res.get("message")
+                failed_details.append((url, error_msg))
         
         if total_links == 1:
             if success_count == 1:
@@ -271,7 +367,20 @@ class TGService:
                 await status_msg.edit_text("🔍 分享链接正在审核中，将在审核通过后，进行保存分享处理")
             else:
                 # For single failed link
-                await status_msg.edit_text(f"❌ 处理完成，但链接处理失败。\n\n成功: 0\n❌ 失败: 1")
+                error_text = "❌ 处理完成，但链接处理失败。"
+                if isinstance(last_res, dict):
+                    err_type = last_res.get("error_type")
+                    if err_type == "expired":
+                        error_text = "⚠️ 分享链接已过期"
+                    elif err_type == "violated":
+                        error_text = "🚫 分享链接包含违规内容"
+                    elif last_res.get("message"):
+                        error_text = f"❌ {last_res.get('message')}"
+                
+                if error_text.startswith("❌ 处理完成"):
+                    await status_msg.edit_text(f"{error_text}\n\n成功: 0\n❌ 失败: 1")
+                else:
+                    await status_msg.edit_text(error_text)
         else:
             # Final notification for batch
             result_text = f"✅ 批量处理完成！\n\n成功: {success_count}\n"
@@ -279,24 +388,36 @@ class TGService:
                 result_text += f"⏳ 审核中 (转换后自动发布): {pending_count}\n"
             if failed_count:
                 result_text += f"❌ 失败: {failed_count}\n"
+                # Add detailed failure information
+                if failed_details:
+                    result_text += "\n📋 失败详情：\n"
+                    for idx, (failed_url, error_msg) in enumerate(failed_details, 1):
+                        # Shorten URL to make it more readable
+                        short_url = failed_url if len(failed_url) <= 50 else failed_url[:47] + "..."
+                        result_text += f"{idx}. {error_msg}\n   {short_url}\n"
             
             await status_msg.edit_text(result_text)
 
-        # Broadcast to channels (Batch if success > 0)
-        if processed_links:
-            await self.broadcast_to_channels(processed_links, {
-                "full_text": full_text,
-                "entities": ser_entities,
-                "photo_id": photo.file_id if photo else None
-            })
+        # Broadcast removed from here because it's done segment-wise in the loop
 
         # Notify admin if configured
         if settings.TG_USER_ID and str(message.chat.id) != str(settings.TG_USER_ID):
             try:
-                await self.bot.send_message(
-                    settings.TG_USER_ID, 
-                    f"📢 用户 {message.chat.id} 提交了 {total_links} 个链接\n{result_text}"
-                )
+                admin_msg = f"📢 用户 {message.chat.id} 提交了 {total_links} 个链接\n\n"
+                admin_msg += f"成功: {success_count}\n"
+                if pending_count:
+                    admin_msg += f"⏳ 审核中: {pending_count}\n"
+                if failed_count:
+                    admin_msg += f"❌ 失败: {failed_count}\n"
+                    if failed_details:
+                        admin_msg += "\n失败详情：\n"
+                        for idx, (failed_url, error_msg) in enumerate(failed_details[:3], 1):  # Show max 3 to admin
+                            short_url = failed_url if len(failed_url) <= 40 else failed_url[:37] + "..."
+                            admin_msg += f"{idx}. {error_msg}: {short_url}\n"
+                        if len(failed_details) > 3:
+                            admin_msg += f"... 还有 {len(failed_details) - 3} 个失败链接"
+                
+                await self.bot.send_message(settings.TG_USER_ID, admin_msg)
             except Exception as e:
                 logger.error(f"Failed to notify admin: {e}")
 
@@ -362,6 +483,50 @@ class TGService:
         logger.warning(f"⏰ 链接审核轮询超时 (3小时): {share_url}")
         await message.reply(f"⏰ 链接审核轮询超时 (已持续 3 小时)，请稍后手动检查: {share_url}")
         await self._delete_pending_task(pending_info.get("db_id"))
+
+    def _slice_message(self, text: str, entities: list, start_u16: int, end_u16: int) -> tuple[str, list]:
+        """Slice message and entities to a specific UTF-16 range"""
+        # Encode to UTF-16-LE to work with offsets
+        u16_text = text.encode('utf-16-le')
+        # Each code unit is 2 bytes
+        slice_u16 = u16_text[start_u16*2:end_u16*2]
+        new_text = slice_u16.decode('utf-16-le')
+        
+        new_entities = []
+        if entities:
+            from aiogram.types import MessageEntity
+            for e in entities:
+                is_dict = isinstance(e, dict)
+                offset = e.get("offset") if is_dict else e.offset
+                length = e.get("length") if is_dict else e.length
+                
+                # Check if entity is within the slice
+                if offset >= start_u16 and (offset + length) <= end_u16:
+                    # Fully contained
+                    new_offset = offset - start_u16
+                    if is_dict:
+                        e_copy = e.copy()
+                        e_copy["offset"] = new_offset
+                        new_entities.append(MessageEntity(**e_copy))
+                    else:
+                        e_copy = e.model_copy(update={"offset": new_offset})
+                        new_entities.append(e_copy)
+                elif offset < end_u16 and (offset + length) > start_u16:
+                    # Partially contained - slice it
+                    o_start = max(offset, start_u16)
+                    o_end = min(offset + length, end_u16)
+                    new_offset = o_start - start_u16
+                    new_length = o_end - o_start
+                    if is_dict:
+                        e_copy = e.copy()
+                        e_copy["offset"] = new_offset
+                        e_copy["length"] = new_length
+                        new_entities.append(MessageEntity(**e_copy))
+                    else:
+                        e_copy = e.model_copy(update={"offset": new_offset, "length": new_length})
+                        new_entities.append(e_copy)
+                        
+        return new_text, new_entities
 
     def _get_utf16_len(self, text: str) -> int:
         """Calculate length in UTF-16 code units"""
