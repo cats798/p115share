@@ -327,7 +327,7 @@
                </thead>
                <tbody>
                  <tr v-for="(h, idx) in parseResult?.headers" :key="h">
-                   <td>{{ String.fromCharCode(65 + idx) }}</td>
+                   <td>{{ String.fromCharCode(65 + Number(idx)) }}</td>
                    <td>{{ h }}</td>
                    <td>{{ parseResult?.preview[0][h] }}</td>
                    <td>
@@ -710,7 +710,7 @@ onUnmounted(() => {
 }
 
 .task-item.active {
-  background: v-bind('antdToken.colorItemBgActive');
+  background: v-bind('antdToken.controlItemBgActive');
   border-right: 3px solid v-bind('antdToken.colorPrimary');
 }
 
@@ -792,7 +792,7 @@ onUnmounted(() => {
 }
 
 .total .stat-icon { color: v-bind('antdToken.colorPrimary'); }
-.processing .stat-icon { color: v-bind('antdToken.colorPlaceholder'); }
+.processing .stat-icon { color: v-bind('antdToken.colorTextPlaceholder'); }
 .success .stat-icon { color: v-bind('antdToken.colorSuccess'); }
 .error .stat-icon { color: v-bind('antdToken.colorError'); }
 
