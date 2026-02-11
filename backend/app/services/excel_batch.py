@@ -103,50 +103,104 @@ class ExcelBatchService:
     async def _worker(self):
         while True:
             try:
-                # Check for tasks that are "running" but have pending items
+                # Check for tasks that are "running"
                 async with async_session() as session:
                     result = await session.execute(
                         select(ExcelTask).where(ExcelTask.status == "running").limit(1)
                     )
                     task = result.scalar_one_or_none()
-                
-                if not task:
-                    # No running task found, exit worker instead of polling
-                    logger.info("Excel 批量转存服务工作线程退出（无运行中的任务）")
-                    self.worker_task = None
-                    break
-                
-                self.active_task_id = task.id
-                interval_min = task.interval_min
-                interval_max = task.interval_max
-                
-                # Get one pending item
-                async with async_session() as session:
-                    result = await session.execute(
-                        select(ExcelTaskItem).where(
-                            ExcelTaskItem.task_id == task.id,
-                            ExcelTaskItem.status == "待处理"
-                        ).order_by(ExcelTaskItem.row_index).limit(1)
-                    )
-                    item = result.scalar_one_or_none()
                     
-                    if item:
-                        item.status = "处理中"
-                        item_id = item.id
-                        await session.commit()
-                    else:
-                        # No more pending items for this task
-                        await session.execute(
-                            update(ExcelTask).where(ExcelTask.id == task.id).values(status="completed")
+                    if not task:
+                        # If no running task, check for "queued" tasks
+                        result = await session.execute(
+                            select(ExcelTask).where(ExcelTask.status == "queued").order_by(ExcelTask.created_at).limit(1)
                         )
-                        await session.commit()
-                        self.active_task_id = None
-                        continue
+                        task = result.scalar_one_or_none()
+                        if task:
+                            # Start the queued task
+                            task.status = "running"
+                            await session.commit()
+                            logger.info(f"队列任务 {task.id} ({task.name}) 开始运行")
+                
+                    if not task:
+                        # If no running taskFound, exit worker
+                        logger.info("Excel 批量转存服务工作线程退出（无运行中的任务）")
+                        self.worker_task = None
+                        break
+                    
+                    self.active_task_id = task.id
+                    interval_min = task.interval_min
+                    interval_max = task.interval_max
+                    
+                    try:
+                        # Get one pending item
+                        async with async_session() as session:
+                            result = await session.execute(
+                                select(ExcelTaskItem).where(
+                                    ExcelTaskItem.task_id == task.id,
+                                    ExcelTaskItem.status == "待处理"
+                                ).order_by(ExcelTaskItem.row_index).limit(1)
+                            )
+                            item = result.scalar_one_or_none()
+                            
+                            if item:
+                                item.status = "处理中"
+                                item_id = item.id
+                                # Update current_row in ExcelTask and set is_waiting to False
+                                await session.execute(
+                                    update(ExcelTask).where(ExcelTask.id == task.id).values(
+                                        current_row=item.row_index,
+                                        is_waiting=False
+                                    )
+                                )
+                                await session.commit()
+                            else:
+                                # No more pending items for this task
+                                await session.execute(
+                                    update(ExcelTask).where(ExcelTask.id == task.id).values(
+                                        status="completed", 
+                                        current_row=0,
+                                        is_waiting=False
+                                    )
+                                )
+                                await session.commit()
+                                self.active_task_id = None
+                                continue
 
-                # Process the item
-                await self._process_item(item_id)
+                        # Process the item
+                        await self._process_item(item_id)
+                    finally:
+                        # Find next row and set is_waiting to True before sleep
+                        if item_id:
+                            async with async_session() as session:
+                                # Look ahead for next pending item
+                                next_result = await session.execute(
+                                    select(ExcelTaskItem.row_index).where(
+                                        ExcelTaskItem.task_id == task.id,
+                                        ExcelTaskItem.status == "待处理"
+                                    ).order_by(ExcelTaskItem.row_index).limit(1)
+                                )
+                                next_row = next_result.scalar_one_or_none()
+                                
+                                if next_row:
+                                    await session.execute(
+                                        update(ExcelTask).where(ExcelTask.id == task.id).values(
+                                            current_row=next_row,
+                                            is_waiting=True
+                                        )
+                                    )
+                                else:
+                                    await session.execute(
+                                        update(ExcelTask).where(ExcelTask.id == task.id).values(
+                                            current_row=0,
+                                            is_waiting=False
+                                        )
+                                    )
+                                await session.commit()
+                        self.active_task_id = None
                 
                 # Rate limiting (Random interval)
+
                 interval = random.randint(interval_min, interval_max)
                 await asyncio.sleep(interval)
                 
@@ -253,54 +307,143 @@ class ExcelBatchService:
             )
             await session.commit()
 
-    async def start_task(self, task_id: int, item_ids: list = None, interval_min: int = 5, interval_max: int = 10):
+    async def start_task(self, task_id: int, skip_count: int = 0, interval_min: int = 5, interval_max: int = 10):
         async with async_session() as session:
-            # Update intervals and status
-            await session.execute(
-                update(ExcelTask).where(ExcelTask.id == task_id).values(
-                    interval_min=interval_min,
-                    interval_max=interval_max,
-                    status="running"
-                )
-            )
+            # Get currrent status
+            result = await session.execute(select(ExcelTask).where(ExcelTask.id == task_id))
+            task = result.scalar_one()
             
-            if item_ids:
-                # 将选中的项设为待处理
+            # Check if another task is already running
+            result = await session.execute(
+                select(ExcelTask).where(ExcelTask.status == "running", ExcelTask.id != task_id)
+            )
+            other_running = result.scalar_one_or_none()
+            
+            new_status = "queued" if other_running else "running"
+            
+            # If resume from paused, dont reset skip/pending
+            is_resume = task.status == "paused"
+            
+            # Update intervals and status
+            task.interval_min = interval_min
+            task.interval_max = interval_max
+            task.status = new_status
+            
+            if not is_resume:
+                task.skip_count = skip_count
+                task.current_row = 0
+                # Mark first skip_count items as "跳过"
                 await session.execute(
                     update(ExcelTaskItem).where(
                         ExcelTaskItem.task_id == task_id,
-                        ExcelTaskItem.id.in_(item_ids)
-                    ).values(status="待处理")
+                        ExcelTaskItem.row_index <= skip_count
+                    ).values(status="跳过", error_msg=None, new_share_url=None)
                 )
-                # 将其他原本待处理的项设为跳过
+                # Mark remaining items as "待处理"
                 await session.execute(
                     update(ExcelTaskItem).where(
                         ExcelTaskItem.task_id == task_id,
-                        ExcelTaskItem.id.notin_(item_ids),
-                        ExcelTaskItem.status == "待处理"
-                    ).values(status="跳过")
+                        ExcelTaskItem.row_index > skip_count
+                    ).values(status="待处理", error_msg=None, new_share_url=None)
                 )
-            else:
-                # 如果没有选择特定项，确保原本待处理的项依然是待处理 (应对重新开始已暂停的任务)
-                pass
             
             await session.commit()
+            
+            if new_status == "running":
+                logger.info(f"任务 {task_id} 开始运行")
+            else:
+                logger.info(f"任务 {task_id} 已进入队列排队")
+
         await self._update_task_counts(task_id)
-        await self.start_worker()
+        if new_status == "running":
+            await self.start_worker()
+
+    async def shutdown(self):
+        """Handle graceful shutdown: pause running tasks, reset queued tasks"""
+        logger.info("Excel 批量转存服务正在关闭，正在保存任务状态...")
+        async with async_session() as session:
+            # Reset running, pausing, cancelling, and queued tasks to paused
+            await session.execute(
+                update(ExcelTask).where(
+                    ExcelTask.status.in_(["running", "pausing", "cancelling", "queued"])
+                ).values(status="paused", is_waiting=False)
+            )
+            await session.commit()
+        
+        # Wait for current processing item if any
+        wait_start = datetime.now()
+        while self.active_task_id is not None:
+            await asyncio.sleep(0.1)
+            if (datetime.now() - wait_start).total_seconds() > 30:
+                logger.warning("Excel shutdown wait timeout")
+                break
+        
+        logger.info("Excel 批量转存服务已关闭")
+
 
     async def pause_task(self, task_id: int):
+        async with async_session() as session:
+            # Set to transitional status first
+            await session.execute(
+                update(ExcelTask).where(ExcelTask.id == task_id).values(status="pausing")
+            )
+            await session.commit()
+        
+        # Safety wait: wait until the current item processing finishes
+        wait_start = datetime.now()
+        while self.active_task_id == task_id:
+            await asyncio.sleep(0.1)
+            if (datetime.now() - wait_start).total_seconds() > 60:
+                logger.warning(f"Pause task {task_id} safety wait timeout")
+                break
+        
+        # Set to final status
         async with async_session() as session:
             await session.execute(
                 update(ExcelTask).where(ExcelTask.id == task_id).values(status="paused")
             )
             await session.commit()
+        logger.info(f"Task {task_id} paused safely")
 
     async def cancel_task(self, task_id: int):
+        async with async_session() as session:
+            # Set to transitional status first
+            await session.execute(
+                update(ExcelTask).where(ExcelTask.id == task_id).values(status="cancelling")
+            )
+            await session.commit()
+            
+        # Safety wait: same as pause
+        wait_start = datetime.now()
+        while self.active_task_id == task_id:
+            await asyncio.sleep(0.1)
+            if (datetime.now() - wait_start).total_seconds() > 60:
+                break
+        
+        # Set to final status
         async with async_session() as session:
             await session.execute(
                 update(ExcelTask).where(ExcelTask.id == task_id).values(status="cancelled")
             )
             await session.commit()
+        logger.info(f"Task {task_id} cancelled safely")
+
+    async def recover_tasks(self):
+        """Recover tasks from non-graceful shutdown"""
+        logger.info("Excel 批量转存服务正在进行故障恢复...")
+        async with async_session() as session:
+            # 1. Reset tasks that were stuck in active or transitional states
+            await session.execute(
+                update(ExcelTask).where(
+                    ExcelTask.status.in_(["running", "pausing", "cancelling", "queued"])
+                ).values(status="paused", is_waiting=False)
+            )
+            # 2. Reset items that were stuck in "处理中"
+            await session.execute(
+                update(ExcelTaskItem).where(ExcelTaskItem.status == "处理中").values(status="待处理")
+            )
+            await session.commit()
+        logger.info("Excel 故障恢复完成")
 
     async def delete_task(self, task_id: int):
         async with async_session() as session:

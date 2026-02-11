@@ -157,6 +157,9 @@
                   <div class="stat-value">
                      <h3>{{ (currentTask?.success_count || 0) + (currentTask?.fail_count || 0) }}</h3>
                      <p>已处理</p>
+                     <div v-if="(currentTask?.status === 'running' || currentTask?.status === 'pausing' || currentTask?.status === 'cancelling') && (currentTask?.current_row > 0)" class="current-row-info">
+                        {{ currentTask?.is_waiting ? '等待处理' : '正在处理' }}第 {{ currentTask?.current_row }} 行
+                     </div>
                   </div>
                 </div>
               </a-col>
@@ -195,68 +198,70 @@
                   </div>
                </div>
                 <div class="form-row">
-                 <div class="form-item">
-                    <label>转存间隔 (秒)</label>
-                    <div class="interval-input">
-                       <a-input-number v-model:value="intervalMin" :min="1" :precision="0" style="width: 80px" />
-                       <span style="margin: 0 8px">-</span>
-                       <a-input-number v-model:value="intervalMax" :min="1" :precision="0" style="width: 80px" />
-                       <span style="margin-left: 8px">随机休眠</span>
-                    </div>
-                 </div>
-               </div>
+                  <div class="form-item">
+                     <label>转存间隔 (秒)</label>
+                     <div class="interval-input">
+                        <a-input-number v-model:value="intervalMin" :min="1" :precision="0" style="width: 80px" />
+                        <span style="margin: 0 8px">-</span>
+                        <a-input-number v-model:value="intervalMax" :min="1" :precision="0" style="width: 80px" />
+                        <span style="margin-left: 8px">随机休眠</span>
+                     </div>
+                  </div>
+                  <div class="form-item" style="margin-left: 24px">
+                     <label>跳过前几条</label>
+                     <a-input-number 
+                        v-model:value="skipCount" 
+                        :min="0" 
+                        :precision="0" 
+                         style="width: 100px"
+                         :disabled="['running', 'paused', 'pausing', 'cancelling'].includes(currentTask?.status)"
+                      />
+                  </div>
+                </div>
                <div class="form-actions">
                   <a-space>
                     <a-button 
-                      v-if="currentTask?.status === 'wait' || currentTask?.status === 'paused' || currentTask?.status === 'cancelled' || currentTask?.status === 'completed'" 
+                      v-if="currentTask?.status === 'wait' || currentTask?.status === 'paused' || currentTask?.status === 'cancelled' || currentTask?.status === 'completed' || currentTask?.status === 'queued'" 
                       type="primary" 
                       @click="handleStartTask" 
-                      :disabled="selectedRowKeys.length === 0"
                     >
-                      开始转存分享
+                      {{ currentTask?.status === 'paused' ? '继续转存分享' : '开始转存分享' }}
                     </a-button>
-                    <a-button v-if="currentTask?.status === 'running'" type="primary" @click="handlePauseTask">
-                      暂停转存分享
-                    </a-button>
-                    <!-- User mentioned "暂停/继续、取消" -->
-                    <a-button v-if="currentTask?.status === 'running' || currentTask?.status === 'paused'" @click="handleCancelTask">
-                      取消转存分享
-                    </a-button>
+                     <a-button v-if="currentTask?.status === 'running' || currentTask?.status === 'pausing'" type="primary" @click="handlePauseTask" :loading="pausing || currentTask?.status === 'pausing'" :disabled="currentTask?.status === 'pausing'">
+                       暂停转存分享
+                     </a-button>
+                     <!-- User mentioned "暂停/继续、取消" -->
+                     <a-button v-if="['running', 'paused', 'pausing'].includes(currentTask?.status)" @click="handleCancelTask" :loading="cancelling || currentTask?.status === 'cancelling'" :disabled="currentTask?.status === 'cancelling'">
+                       取消转存分享
+                     </a-button>
                   </a-space>
                </div>
             </div>
           </div>
 
-          <!-- Links List -->
-          <div class="links-list-container">
-            <div class="list-header">
-               <div class="section-title"><UnorderedListOutlined /> 分享链接列表</div>
-               <div class="header-actions">
-                  <a-space>
-                     <a-button size="small" @click="selectAll">全选</a-button>
-                     <a-button size="small" @click="selectedRowKeys = []">取消全选</a-button>
-                  </a-space>
+            <!-- Links List -->
+            <div class="links-list-container">
+               <div class="section-title" style="margin-top: 16px">
+                  <UnorderedListOutlined /> 分享链接列表
                </div>
-            </div>
             
             <!-- Filter & Search -->
             <div class="filter-bar">
-               <a-select v-model:value="filterStatus" placeholder="选择状态" style="width: 120px" allow-clear @change="fetchItems">
+               <a-select v-model:value="filterStatus" placeholder="选择状态" style="width: 120px" allow-clear @change="fetchTaskItems(1)">
                   <a-select-option value="待处理">待处理</a-select-option>
                   <a-select-option value="处理中">处理中</a-select-option>
                   <a-select-option value="成功">成功</a-select-option>
                   <a-select-option value="失败">失败</a-select-option>
                   <a-select-option value="跳过">跳过</a-select-option>
                </a-select>
-               <a-input-search v-model:value="searchQuery" placeholder="搜索资源名称" style="width: 200px" @search="fetchItems" />
+               <a-input-search v-model:value="searchQuery" placeholder="搜索资源名称" style="width: 200px" @search="fetchTaskItems(1)" />
             </div>
 
             <a-table
               :columns="columns"
               :data-source="items"
-              :pagination="pagination"
+              :pagination="false"
               :loading="itemsLoading"
-              :row-selection="rowSelection"
               row-key="id"
               size="small"
               :scroll="{ y: '100%' }"
@@ -273,8 +278,24 @@
                 <template v-if="column.key === 'error_msg'">
                   <span style="color: #ff4d4f">{{ record.error_msg }}</span>
                 </template>
-              </template>
+                </template>
             </a-table>
+
+            <div class="table-footer">
+               <div class="footer-left">
+               </div>
+               <div class="footer-right">
+                  <a-pagination
+                    v-model:current="pagination.current"
+                    v-model:pageSize="pagination.pageSize"
+                    :total="pagination.total"
+                    :show-size-changer="true"
+                    :page-size-options="['10', '20', '50', '100', '200', '500', '1000', '2000', '5000', '10000']"
+                    size="small"
+                    @change="handleTableChange"
+                  />
+               </div>
+            </div>
           </div>
         </div>
         
@@ -407,7 +428,6 @@ const pagination = reactive({
 
 const filterStatus = ref<string | undefined>(undefined);
 const searchQuery = ref('');
-const selectedRowKeys = ref<any[]>([]);
 const intervalMin = ref(5);
 const intervalMax = ref(10);
 const systemSaveDir = ref('/分享保存');
@@ -416,6 +436,9 @@ const systemSaveDir = ref('/分享保存');
 const mappingModalVisible = ref(false);
 const uploading = ref(false);
 const creatingTask = ref(false);
+const pausing = ref(false);
+const cancelling = ref(false);
+const skipCount = ref(0);
 const pendingFile = ref<File | null>(null);
 const parseResult = ref<any>(null);
 const mapping = reactive({
@@ -436,12 +459,7 @@ const columns = [
   { title: '错误信息', dataIndex: 'error_msg', key: 'error_msg', ellipsis: true },
 ];
 
-const rowSelection = computed(() => ({
-  selectedRowKeys: selectedRowKeys.value,
-  onChange: (keys: any[]) => {
-    selectedRowKeys.value = keys;
-  },
-}));
+// rowSelection logic removed
 
 // Methods
 const fetchTasks = async () => {
@@ -482,13 +500,13 @@ const fetchCurrentTask = async () => {
   }
 };
 
-const fetchItems = async (silent = false) => {
+const fetchTaskItems = async (page = 1, silent = false) => {
   if (!currentTaskId.value) return;
   if (!silent) itemsLoading.value = true;
   try {
     const res = await axios.get(`/api/excel/tasks/${currentTaskId.value}/items`, {
       params: {
-        page: pagination.current,
+        page,
         page_size: pagination.pageSize,
         status: filterStatus.value
       }
@@ -496,6 +514,7 @@ const fetchItems = async (silent = false) => {
     if (res.data.status === 'success') {
       items.value = res.data.data;
       pagination.total = res.data.total;
+      pagination.current = page;
     }
   } catch (e) {
     console.error(e);
@@ -506,8 +525,11 @@ const fetchItems = async (silent = false) => {
 
 const selectTask = (id: number) => {
   currentTaskId.value = id;
+  const task = tasks.value.find(t => t.id === id);
+  skipCount.value = task?.skip_count || 0;
   pagination.current = 1;
-  fetchItems();
+  pagination.pageSize = 50;
+  fetchTaskItems();
 };
 
 const handleBeforeUpload = async (file: File) => {
@@ -568,27 +590,38 @@ const handleMappingOk = async () => {
 
 const handleStartTask = async () => {
   if (!currentTaskId.value) return;
+  // If paused, allow starting without selection (continue from where it left off)
+  const isResume = currentTask.value?.status === 'paused';
+
   try {
     await axios.post(`/api/excel/tasks/${currentTaskId.value}/start`, {
-      item_ids: selectedRowKeys.value,
+      skip_count: skipCount.value,
       interval_min: intervalMin.value,
       interval_max: intervalMax.value
     });
-    message.success('正在启动转存分享...');
+    message.success(isResume ? '正在继续转存分享...' : '正在启动转存分享...');
     await fetchTasks();
   } catch (e) {
-    message.error('启动失败');
+    message.error(isResume ? '继续失败' : '启动失败');
   }
 };
 
 const handlePauseTask = async () => {
   if (!currentTaskId.value) return;
+  pausing.value = true;
   try {
     await axios.post(`/api/excel/tasks/${currentTaskId.value}/pause`);
     message.success('已暂停');
-    await fetchTasks();
+    await fetchCurrentTask(); // Sync current task immediately
+    await fetchTaskItems(pagination.current, true); // Sync table items immediately
+    // Delay sidebar refresh by 3s as requested
+    setTimeout(() => {
+      fetchTasks();
+    }, 3000);
   } catch (e) {
     message.error('请求失败');
+  } finally {
+    pausing.value = false;
   }
 };
 
@@ -598,12 +631,20 @@ const handleCancelTask = async () => {
      title: '确认取消转存？',
      content: '取消后将停止当前任务的处理，是否继续？',
      onOk: async () => {
+        cancelling.value = true;
         try {
-          await axios.post(`/api/excel/tasks/${currentTaskId.value}/pause`); 
+          await axios.post(`/api/excel/tasks/${currentTaskId.value}/cancel`); 
           message.success('任务已取消处理');
-          await fetchTasks();
+          await fetchCurrentTask(); // Sync current task immediately
+          await fetchTaskItems(pagination.current, true); // Sync table items immediately
+          // Delay sidebar refresh by 3s
+          setTimeout(() => {
+            fetchTasks();
+          }, 3000);
         } catch (e) {
           message.error('请求失败');
+        } finally {
+          cancelling.value = false;
         }
      }
   });
@@ -638,7 +679,10 @@ const getStatusText = (status: string) => {
     'running': '运行中',
     'paused': '已暂停',
     'completed': '已完成',
-    'cancelled': '已取消'
+    'cancelled': '已取消',
+    'queued': '排队中',
+    'pausing': '暂停中...',
+    'cancelling': '取消中...'
   };
   return map[status] || status;
 };
@@ -649,20 +693,22 @@ const getStatusTagColor = (status: string) => {
     'running': 'processing',
     'paused': 'warning',
     'completed': 'success',
-    'cancelled': 'error'
+    'cancelled': 'error',
+    'queued': 'cyan',
+    'pausing': 'orange',
+    'cancelling': 'volcano'
   };
   return map[status] || 'default';
 };
 
-const handleTableChange = (pag: any) => {
-  pagination.current = pag.current;
-  pagination.pageSize = pag.pageSize;
-  fetchItems();
+// 移除 skipCount 的 watch，因为用户要求修改该值时不触发表格请求
+
+const handleTableChange = (page: number, pageSize: number) => {
+  pagination.pageSize = pageSize;
+  fetchTaskItems(page);
 };
 
-const selectAll = () => {
-  selectedRowKeys.value = items.value.map(i => i.id);
-};
+// selectAll removed
 
 const downloadTemplate = () => {
   window.open('/static/template/分享链接导入模板.xlsx', '_blank');
@@ -689,10 +735,22 @@ watch([currentTaskId, () => currentTask.value?.status], ([newId, status]) => {
      clearInterval(pollTimer);
      pollTimer = null;
   }
-  if (newId && status === 'running') {
-    pollTimer = setInterval(() => {
-      fetchCurrentTask();
-      fetchItems(true); // silent fetch for background update
+  if (newId && ['running', 'pausing', 'cancelling'].includes(status)) {
+    pollTimer = setInterval(async () => {
+      await fetchTasks(); // Sync sidebar periodically
+      await fetchCurrentTask();
+      
+      // Auto-pagination logic
+      if (currentTask.value?.current_row) {
+        const targetPage = Math.ceil(currentTask.value.current_row / pagination.pageSize);
+        if (targetPage !== pagination.current) {
+          fetchTaskItems(targetPage, true);
+        } else {
+          fetchTaskItems(pagination.current, true);
+        }
+      } else {
+        fetchTaskItems(pagination.current, true);
+      }
     }, 3000);
   }
 }, { immediate: true });
@@ -1171,6 +1229,38 @@ onUnmounted(() => {
   top: 0;
 }
 
+/* Table Footer with Skip Input */
+.table-footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 12px 16px;
+  background: v-bind('antdToken.colorFillAlter');
+  border-top: 1px solid v-bind('antdToken.colorBorderSecondary');
+  border-radius: 0 0 8px 8px;
+  margin-top: -1px; /* Overlap with table border if any */
+}
+
+.footer-left {
+  display: flex;
+  align-items: center;
+}
+
+.skip-input {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: v-bind('antdToken.colorBgContainer');
+  padding: 4px 12px;
+  border-radius: 4px;
+  border: 1px solid v-bind('antdToken.colorBorder');
+}
+
+.skip-input .label {
+  font-size: 13px;
+  color: v-bind('antdToken.colorTextSecondary');
+}
+
 @media (max-width: 768px) {
   .work-view { flex-direction: column; }
   .task-sidebar { width: 100%; height: 200px; border-right: none; border-bottom: 1px solid v-bind('antdToken.colorBorderSecondary'); }
@@ -1178,5 +1268,10 @@ onUnmounted(() => {
   .form-row { flex-direction: column; gap: 12px; }
   .stat-card { flex-direction: column; height: auto; padding: 12px; text-align: center; }
   .stats-cards .ant-col { margin-bottom: 12px; }
+}
+.current-row-info {
+  font-size: 12px;
+  color: #1890ff;
+  margin-top: 4px;
 }
 </style>

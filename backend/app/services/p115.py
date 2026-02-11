@@ -733,8 +733,10 @@ class P115Service:
                 # 3. Clear cache
                 self.clear_save_dir_cache()
                 logger.info(f"✅ 保存目录清理完成")
+                return True
             except Exception as e:
                 logger.error(f"❌ 清理目录失败: {e}")
+                return False
 
     async def get_storage_stats(self) -> Tuple[int, int]:
         """Get storage stats (used, total) of 115 Drive in bytes"""

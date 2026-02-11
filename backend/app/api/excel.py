@@ -11,7 +11,7 @@ from app.api.auth import get_current_user
 router = APIRouter(prefix="/excel", tags=["excel"])
 
 class StartTaskRequest(BaseModel):
-    item_ids: Optional[List[int]] = None
+    skip_count: Optional[int] = 0
     interval_min: Optional[int] = 5
     interval_max: Optional[int] = 10
 
@@ -93,12 +93,17 @@ async def get_task_items(
 
 @router.post("/tasks/{task_id}/start")
 async def start_task(task_id: int, req: StartTaskRequest, current_user: dict = Depends(get_current_user)):
-    await excel_batch_service.start_task(task_id, req.item_ids, req.interval_min, req.interval_max)
+    await excel_batch_service.start_task(task_id, req.skip_count, req.interval_min, req.interval_max)
     return {"status": "success"}
 
 @router.post("/tasks/{task_id}/pause")
 async def pause_task(task_id: int, current_user: dict = Depends(get_current_user)):
     await excel_batch_service.pause_task(task_id)
+    return {"status": "success"}
+
+@router.post("/tasks/{task_id}/cancel")
+async def cancel_task(task_id: int, current_user: dict = Depends(get_current_user)):
+    await excel_batch_service.cancel_task(task_id)
     return {"status": "success"}
 
 @router.delete("/tasks/{task_id}")

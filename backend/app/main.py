@@ -121,12 +121,15 @@ async def lifespan(app: FastAPI):
     from app.services.scheduler import cleanup_scheduler
     cleanup_scheduler.start()
     
-    # Excel Batch worker will start on-demand when user starts a task
-    # No need to start it here
+    # Excel Batch recovery and logic
+    from app.services.excel_batch import excel_batch_service
+    await excel_batch_service.recover_tasks()
     
     yield
     
     # Shutdown
+    from app.services.excel_batch import excel_batch_service
+    await excel_batch_service.shutdown()
     cleanup_scheduler.shutdown()
     logger.info("P115-Share API shutting down...")
 
