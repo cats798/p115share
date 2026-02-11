@@ -44,27 +44,49 @@ class Settings(BaseSettings):
     HTTPS_PROXY: str = ""
 
     async def init_db(self):
-        """Initialize database tables and migrate from JSON if needed"""
+        """Initialize database tables and ensure schema is up-to-date"""
         async with engine.begin() as conn:
-            # Create tables
+            # Create tables (handles fresh database)
             await conn.run_sync(Base.metadata.create_all)
+            # Migrate missing columns for existing databases
+            await conn.run_sync(self._migrate_columns)
+
+    def _migrate_columns(self, conn):
+        """Check all model tables for missing columns and add them via ALTER TABLE"""
+        from sqlalchemy import inspect, text
+        inspector = inspect(conn)
+        
+        for table in Base.metadata.sorted_tables:
+            table_name = table.name
+            if not inspector.has_table(table_name):
+                continue
             
-        # Run migrations using Alembic
-        try:
-            import subprocess
-            import sys
-            logger.info("正在检查并执行数据库迁移 (Alembic)...")
-            result = subprocess.run(
-                [sys.executable, "-m", "alembic", "upgrade", "head"],
-                capture_output=True,
-                text=True,
-                check=True
-            )
-            logger.debug(f"Alembic: {result.stdout}")
-        except Exception as e:
-            logger.error(f"数据库迁移失败: {e}")
-            if hasattr(e, "stderr"):
-                logger.error(f"错误详情: {e.stderr}")
+            existing_cols = {col['name'] for col in inspector.get_columns(table_name)}
+            
+            for column in table.columns:
+                if column.name not in existing_cols:
+                    # Build ALTER TABLE ADD COLUMN statement
+                    col_type = column.type.compile(conn.dialect)
+                    sql = f"ALTER TABLE {table_name} ADD COLUMN {column.name} {col_type}"
+                    
+                    # Add DEFAULT if present
+                    if column.server_default is not None:
+                        default_val = column.server_default.arg
+                        if hasattr(default_val, 'text'):
+                            sql += f" DEFAULT {default_val.text}"
+                        else:
+                            sql += f" DEFAULT '{default_val}'"
+                    elif not column.nullable:
+                        # Non-nullable without default: add a safe default
+                        if "INT" in str(col_type).upper():
+                            sql += " DEFAULT 0"
+                        elif "BOOL" in str(col_type).upper():
+                            sql += " DEFAULT 0"
+                        else:
+                            sql += " DEFAULT ''"
+                    
+                    conn.execute(text(sql))
+                    logger.info(f"📦 数据库迁移: 为表 {table_name} 添加列 {column.name}")
 
         async with async_session() as session:
             # Check if admin exists
