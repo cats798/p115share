@@ -239,10 +239,13 @@ class TGService:
                         asyncio.create_task(self.poll_pending_link(message, save_res))
                         return "pending", None
                     elif save_res.get("status") == "error":
+                        error_type = save_res.get("error_type")
+                        error_msg = save_res.get("message") or "未知错误"
+                        logger.warning(f"⚠️ 处理链接失败 ({error_type}): {error_msg}")
                         return save_res, None
                 
                 # Generic failure without specific error info
-                return {"error_type": "unknown", "message": "处理失败"}, None
+                return {"error_type": "unknown", "message": "处理过程中发生未知错误"}, None
             except Exception as e:
                 logger.error(f"❌ 处理链接出错 {share_url}: {e}")
                 return {"error_type": "exception", "message": str(e)}, None

@@ -268,13 +268,24 @@ class P115Service:
                 timeout=API_TIMEOUT, label="share_snap"
             )
             check_response(snap_resp)
+            logger.debug(f"📋 share_snap 响应数据: {snap_resp.get('data')}")
 
             # Check for audit and violation status
             data = snap_resp.get("data", {})
+            if not data:
+                logger.error("❌ share_snap 响应中缺少 data 字段")
+                return {
+                    "status": "error",
+                    "error_type": "api_error",
+                    "message": "获取分享信息失败：API 响应数据为空"
+                }
+
             share_info = data.get("shareinfo" if "shareinfo" in data else "share_info", {})
             share_state = data.get("share_state", share_info.get("share_state", share_info.get("status"))) # Multiple fallbacks
             share_title = share_info.get("share_title", "")
             have_vio_file = share_info.get("have_vio_file", 0)
+            
+            logger.info(f"📊 分享状态: {share_state}, 标题: {share_title}, 违规标志: {have_vio_file}")
 
             # 优先判断违规内容，无论审核状态如何
             if have_vio_file == 1:
@@ -317,10 +328,14 @@ class P115Service:
                 logger.warning(f"⚠️ 分享链接状态异常 (state={share_state}): {share_url}")
                 # Allow attempt if state is unknown but not explicitly pending/expired/prohibited
             
-            items = snap_resp["data"]["list"]
+            items = data.get("list", [])
             if not items:
-                logger.warning("分享链接内没有文件")
-                return None
+                logger.warning(f"⚠️ 分享链接内没有文件。完整响应状态: {snap_resp.get('state')}")
+                return {
+                    "status": "error",
+                    "error_type": "empty_share",
+                    "message": "分享链接内没有可供转存的文件"
+                }
             
             # Extract file/folder IDs and names
             # Files use 'fid', folders use 'cid'
@@ -336,8 +351,12 @@ class P115Service:
                     logger.warning(f"Item missing both fid and cid: {item}")
             
             if not fids:
-                logger.error("未能提取到任何有效的文件或文件夹 ID")
-                return None
+                logger.error(f"❌ 未能从列表项提取到任何有效的文件或文件夹 ID。项目数: {len(items)}")
+                return {
+                    "status": "error",
+                    "error_type": "parse_error",
+                    "message": "解析分享文件列表失败，无法提取文件 ID"
+                }
             
             logger.info(f"📦 检测到 {len(fids)} 个项目: {', '.join(names[:3])}{'...' if len(names) > 3 else ''}")
             
@@ -431,8 +450,13 @@ class P115Service:
                 "metadata": metadata or {}  # Include metadata in return value
             }
         except Exception as e:
-            logger.error(f"❌ 保存分享链接失败", exc_info=True)
-            return None
+            error_msg = str(e)
+            logger.error(f"❌ 保存分享链接发生程序异常: {error_msg}", exc_info=True)
+            return {
+                "status": "error",
+                "error_type": "exception",
+                "message": f"程序异常: {error_msg}"
+            }
 
     async def get_share_status(self, share_url: str):
         """Check the current status of a share link
@@ -642,7 +666,7 @@ class P115Service:
                 new_fids = [f["fid"] for f in matched_files]
             
             if not new_fids:
-                logger.warning(f"⚠️ 在保存目录 {to_cid} 中未找到对应的文件 {names}，可能保存尚未完成")
+                logger.warning(f"⚠️ 在保存目录 {to_cid} 中未找到对应的文件 {names}，可能 115 处理延迟或保存失败")
                 return None
             
             # 7. Create new share with retry mechanism
