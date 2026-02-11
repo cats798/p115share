@@ -17,11 +17,22 @@ class ExcelBatchService:
         self.active_task_id = None
         self._lock = asyncio.Lock()
 
+    def _read_csv(self, content: bytes):
+        """Try reading CSV with multiple encodings"""
+        for encoding in ['utf-8', 'utf-8-sig', 'gbk', 'gb18030']:
+            try:
+                return pd.read_csv(io.BytesIO(content), encoding=encoding)
+            except UnicodeDecodeError:
+                continue
+            except Exception as e:
+                raise e
+        raise Exception("无法识别CSV文件编码，请确保文件是 UTF-8 或 GBK 格式")
+
     async def parse_file(self, content: bytes, filename: str):
         """Parse Excel/CSV file and return headers and sample data"""
         try:
             if filename.endswith('.csv'):
-                df = pd.read_csv(io.BytesIO(content))
+                df = self._read_csv(content)
             else:
                 df = pd.read_excel(io.BytesIO(content))
             
@@ -43,7 +54,7 @@ class ExcelBatchService:
         """Create task and items based on mapping"""
         try:
             if filename.endswith('.csv'):
-                df = pd.read_csv(io.BytesIO(content))
+                df = self._read_csv(content)
             else:
                 df = pd.read_excel(io.BytesIO(content))
             
