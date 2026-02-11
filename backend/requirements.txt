@@ -19,3 +19,4 @@ pysocks
 pandas
 openpyxl
 xlrd
+alembic
