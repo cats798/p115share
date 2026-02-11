@@ -43,14 +43,6 @@ class Settings(BaseSettings):
     HTTP_PROXY: str = ""
     HTTPS_PROXY: str = ""
 
-    async def init_db(self):
-        """Initialize database tables and ensure schema is up-to-date"""
-        async with engine.begin() as conn:
-            # Create tables (handles fresh database)
-            await conn.run_sync(Base.metadata.create_all)
-            # Migrate missing columns for existing databases
-            await conn.run_sync(self._migrate_columns)
-
     def _migrate_columns(self, conn):
         """Check all model tables for missing columns and add them via ALTER TABLE"""
         from sqlalchemy import inspect, text
@@ -87,6 +79,14 @@ class Settings(BaseSettings):
                     
                     conn.execute(text(sql))
                     logger.info(f"📦 数据库迁移: 为表 {table_name} 添加列 {column.name}")
+
+    async def init_db(self):
+        """Initialize database tables and ensure schema is up-to-date"""
+        async with engine.begin() as conn:
+            # Create tables (handles fresh database)
+            await conn.run_sync(Base.metadata.create_all)
+            # Migrate missing columns for existing databases
+            await conn.run_sync(self._migrate_columns)
 
         async with async_session() as session:
             # Check if admin exists
