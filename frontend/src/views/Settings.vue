@@ -394,6 +394,12 @@ onMounted(loadConfig);
 </script>
 
 <style scoped>
+.settings {
+  height: 100%;
+  overflow-y: auto;
+  padding-right: 8px;
+}
+
 .channel-item {
   background: #fafafa;
   padding: 12px;

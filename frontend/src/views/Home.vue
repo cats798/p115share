@@ -1,5 +1,5 @@
 <template>
-  <a-layout style="min-height: 100vh">
+  <a-layout style="height: 100vh; overflow: hidden">
     <!-- Desktop Sider -->
     <a-layout-sider 
       v-if="!isMobile"
@@ -64,7 +64,7 @@
       </a-menu>
     </a-drawer>
 
-    <a-layout :style="layoutStyle">
+    <a-layout :style="{ ...layoutStyle, height: '100vh', display: 'flex', flexDirection: 'column' }">
       <a-layout-header :style="{ background: antdToken.colorBgContainer, padding: '0 16px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', position: 'sticky', top: 0, zIndex: 99, width: '100%', boxShadow: '0 2px 8px ' + antdToken.colorFillSecondary }">
         <div style="display: flex; align-items: center">
           <a-button 
@@ -112,8 +112,16 @@
       </div>
     </a-layout-header>
       
-      <a-layout-content :style="{ margin: isMobile ? '8px' : '16px' }">
-        <div :style="{ padding: isMobile ? '16px' : '24px', background: antdToken.colorBgContainer, minHeight: '360px', borderRadius: '4px' }">
+      <a-layout-content style="flex: 1; overflow: hidden; display: flex; flex-direction: column; margin: 16px">
+        <div :style="{ 
+          padding: isMobile ? '16px' : '24px', 
+          background: antdToken.colorBgContainer, 
+          flex: 1,
+          display: 'flex',
+          flexDirection: 'column',
+          borderRadius: '4px',
+          overflow: 'hidden'
+        }">
           <Dashboard v-if="currentView === 'dashboard'" />
           <ExcelBatch v-if="currentView === 'excel'" />
           <LogViewer v-if="currentView === 'logs'" />

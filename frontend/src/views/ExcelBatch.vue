@@ -259,7 +259,9 @@
               :row-selection="rowSelection"
               row-key="id"
               size="small"
+              :scroll="{ y: '100%' }"
               @change="handleTableChange"
+              class="flex-table"
             >
               <template #bodyCell="{ column, record }">
                 <template v-if="column.key === 'original_url'">
@@ -400,7 +402,7 @@ const pagination = reactive({
   pageSize: 50,
   total: 0,
   showSizeChanger: true,
-  pageSizeOptions: ['10', '20', '50', '100', '500', '1000'],
+  pageSizeOptions: ['10', '20', '50', '100', '500', '1000', '2000', '5000', '10000'],
 });
 
 const filterStatus = ref<string | undefined>(undefined);
@@ -754,8 +756,9 @@ onUnmounted(() => {
 
 .work-view {
   display: flex;
-  height: calc(100vh - 120px);
+  height: 100%;
   gap: 16px;
+  min-height: 0;
 }
 
 .task-sidebar {
@@ -903,7 +906,7 @@ onUnmounted(() => {
   flex: 1;
   display: flex;
   flex-direction: column;
-  overflow-y: auto;
+  overflow: hidden;
   padding-right: 8px;
 }
 
@@ -1026,6 +1029,58 @@ onUnmounted(() => {
 
 .links-list-container {
   flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  min-height: 0;
+}
+
+.flex-table {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+:deep(.flex-table .ant-table-wrapper) {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+:deep(.flex-table .ant-spin-nested-loading) {
+  flex: 1;
+  min-height: 0;
+}
+
+:deep(.flex-table .ant-spin-container) {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+:deep(.flex-table .ant-table) {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+:deep(.flex-table .ant-table-container) {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+:deep(.flex-table .ant-table-body) {
+  flex: 1 !important;
+  overflow-y: auto !important;
+}
+
+:deep(.flex-table .ant-table-pagination) {
+  margin: 16px 0 0 0 !important;
+  flex-shrink: 0;
 }
 
 .list-header {

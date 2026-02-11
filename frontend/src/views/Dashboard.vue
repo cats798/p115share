@@ -165,3 +165,10 @@ const handleClearHistory = () => {
 
 onMounted(checkStatus);
 </script>
+<style scoped>
+.dashboard {
+  height: 100%;
+  overflow-y: auto;
+  padding-right: 8px;
+}
+</style>
