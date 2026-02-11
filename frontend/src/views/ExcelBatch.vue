@@ -458,9 +458,6 @@ const fetchSettings = async () => {
     const res = await axios.get('/api/config/');
     if (res.data.p115_save_dir) {
       systemSaveDir.value = res.data.p115_save_dir;
-      if (!targetDir.value) {
-        targetDir.value = res.data.p115_save_dir;
-      }
     }
   } catch (e) {
     console.error('获取设置失败', e);
