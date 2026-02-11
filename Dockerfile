@@ -23,6 +23,10 @@ RUN pip install --no-cache-dir -r requirements.txt && \
 COPY backend/app ./app
 COPY backend/alembic.ini ./alembic.ini
 COPY backend/migrations ./migrations
+COPY backend/entrypoint.sh ./entrypoint.sh
+
+# Make entrypoint executable
+RUN chmod +x ./entrypoint.sh
 
 # Copy frontend build to static folder
 COPY --from=build-stage /app/frontend/dist /app/static
@@ -35,4 +39,4 @@ ENV PYTHONPATH=/app
 EXPOSE 8000
 
 # Start command
-CMD ["python", "-m", "app.main"]
+ENTRYPOINT ["./entrypoint.sh"]
