@@ -12,7 +12,8 @@ router = APIRouter(prefix="/excel", tags=["excel"])
 
 class StartTaskRequest(BaseModel):
     item_ids: Optional[List[int]] = None
-    target_dir: Optional[str] = None
+    interval_min: Optional[int] = 5
+    interval_max: Optional[int] = 10
 
 @router.post("/parse")
 async def parse_excel(
@@ -92,7 +93,7 @@ async def get_task_items(
 
 @router.post("/tasks/{task_id}/start")
 async def start_task(task_id: int, req: StartTaskRequest, current_user: dict = Depends(get_current_user)):
-    await excel_batch_service.start_task(task_id, req.item_ids, req.target_dir)
+    await excel_batch_service.start_task(task_id, req.item_ids, req.interval_min, req.interval_max)
     return {"status": "success"}
 
 @router.post("/tasks/{task_id}/pause")

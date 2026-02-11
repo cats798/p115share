@@ -30,6 +30,9 @@ class ConfigUpdate(BaseModel):
     proxy_user: Optional[str] = None
     proxy_pass: Optional[str] = None
     proxy_type: Optional[str] = None
+    p115_cleanup_capacity_enabled: Optional[bool] = None
+    p115_cleanup_capacity_limit: Optional[float] = None
+    p115_cleanup_capacity_unit: Optional[str] = None
 
     @field_validator('p115_cleanup_dir_cron', 'p115_cleanup_trash_cron')
     @classmethod
@@ -41,6 +44,13 @@ class ConfigUpdate(BaseModel):
             return v
         except Exception:
             raise ValueError('无效的 Cron 表达式')
+
+    @field_validator('p115_cleanup_capacity_limit')
+    @classmethod
+    def validate_capacity_limit(cls, v: Optional[float]):
+        if v is not None and v < 1:
+            raise ValueError('容量限制最小值为 1 TB')
+        return v
 
 @router.post("/update")
 async def update_config(cfg: ConfigUpdate, user=Depends(get_current_user)):
@@ -96,6 +106,7 @@ async def update_config(cfg: ConfigUpdate, user=Depends(get_current_user)):
             need_restart_bot = True
     
     # 4. Update Cron tasks
+    # 4. Update Cron tasks
     if "p115_cleanup_dir_cron" in update_data and settings.P115_CLEANUP_DIR_CRON != cfg.p115_cleanup_dir_cron:
         await settings.save_setting("P115_CLEANUP_DIR_CRON", cfg.p115_cleanup_dir_cron)
         from app.services.scheduler import cleanup_scheduler
@@ -105,6 +116,26 @@ async def update_config(cfg: ConfigUpdate, user=Depends(get_current_user)):
         await settings.save_setting("P115_CLEANUP_TRASH_CRON", cfg.p115_cleanup_trash_cron)
         from app.services.scheduler import cleanup_scheduler
         cleanup_scheduler.update_cleanup_trash_job()
+
+    # 4.5 Update Capacity Cleanup (Consolidated)
+    capacity_fields = ["p115_cleanup_capacity_enabled", "p115_cleanup_capacity_limit", "p115_cleanup_capacity_unit"]
+    capacity_changed = False
+    for field in capacity_fields:
+        if field in update_data:
+            val = update_data[field]
+            if field == "p115_cleanup_capacity_limit":
+                val = max(1.0, float(val))
+            elif field == "p115_cleanup_capacity_unit":
+                val = "TB"
+                
+            current_val = getattr(settings, field.upper())
+            if current_val != val:
+                await settings.save_setting(field.upper(), val)
+                capacity_changed = True
+    
+    if capacity_changed:
+        from app.services.scheduler import cleanup_scheduler
+        cleanup_scheduler.update_cleanup_capacity_job()
     
     # 5. Unified restart bot polling
     if need_restart_bot:
@@ -134,6 +165,9 @@ async def get_config(user=Depends(get_current_user)):
         "proxy_user": settings.PROXY_USER,
         "proxy_pass": settings.PROXY_PASS,
         "proxy_type": settings.PROXY_TYPE,
+        "p115_cleanup_capacity_enabled": settings.P115_CLEANUP_CAPACITY_ENABLED,
+        "p115_cleanup_capacity_limit": settings.P115_CLEANUP_CAPACITY_LIMIT,
+        "p115_cleanup_capacity_unit": settings.P115_CLEANUP_CAPACITY_UNIT,
         "version": VERSION
     }
 

@@ -48,6 +48,8 @@ class ExcelTask(Base):
     success_count: Mapped[int] = mapped_column(Integer, default=0)
     fail_count: Mapped[int] = mapped_column(Integer, default=0)
     target_dir: Mapped[str] = mapped_column(String(255), nullable=True)
+    interval_min: Mapped[int] = mapped_column(Integer, default=5)
+    interval_max: Mapped[int] = mapped_column(Integer, default=10)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 class ExcelTaskItem(Base):

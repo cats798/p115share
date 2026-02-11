@@ -64,7 +64,7 @@
         <div class="task-sidebar" :class="{ 'mobile-hidden': isMobile && currentTaskId }">
           <div class="sidebar-header">
             <span>任务列表</span>
-            <a-badge :count="tasks.length" :overflow-count="99" />
+            <div class="task-count-badge">{{ tasks.length }}</div>
           </div>
           <div class="sidebar-content">
             <template v-if="tasks.length === 0">
@@ -80,19 +80,32 @@
                 :class="{ active: currentTaskId === task.id }"
                 @click="selectTask(task.id)"
               >
-                <div class="task-icon">
-                   <FileExcelOutlined />
+                <div class="task-icon-container">
+                   <div class="excel-icon-box">
+                      <FileExcelOutlined />
+                   </div>
                 </div>
                 <div class="task-info">
-                  <div class="task-name">{{ task.name }}</div>
+                  <div class="task-name-row">
+                    <div class="task-name">{{ task.name }}</div>
+                  </div>
                   <div class="task-meta">
-                    <span v-if="task.status === 'running'" class="status-running">运行中</span>
-                    <span v-else-if="task.status === 'paused'" class="status-paused">已暂停</span>
-                    <span v-else-if="task.status === 'completed'" class="status-completed">已完成</span>
-                    <span v-else-if="task.status === 'cancelled'" class="status-cancelled">已取消</span>
-                    <span v-else>待处理</span>
+                    <a-tag :color="getStatusTagColor(task.status)" size="small">
+                      {{ getStatusText(task.status) }}
+                    </a-tag>
                     <span class="count">{{ task.total_count }} 条</span>
                   </div>
+                </div>
+                <div class="task-item-actions">
+                   <a-button 
+                     type="text" 
+                     danger 
+                     size="small"
+                     @click.stop="handleDeleteTask(task.id)"
+                     class="delete-item-btn"
+                   >
+                     <template #icon><DeleteOutlined /></template>
+                   </a-button>
                 </div>
               </div>
             </template>
@@ -172,17 +185,23 @@
           <div class="control-panel">
             <div class="section-title"><SettingOutlined /> 转存分享配置</div>
             <div class="control-form">
-               <div class="form-row">
+                <div class="form-row">
                   <div class="form-item">
-                     <label>目标目录</label>
-                     <a-input v-model:value="targetDir" placeholder="请输入 115 目录路径（如 /云下载），必填" />
+                     <label>保存位置 (全局配置)</label>
+                     <div class="fake-input disabled">
+                        <span>{{ systemSaveDir }}</span>
+                        <a-tooltip title="Excel 转存统一使用系统全局保存路径，如需更改请前往系统设置"><InfoCircleOutlined /></a-tooltip>
+                     </div>
                   </div>
                </div>
-               <div class="form-row">
+                <div class="form-row">
                  <div class="form-item">
-                    <label>转存间隔</label>
+                    <label>转存间隔 (秒)</label>
                     <div class="interval-input">
-                       <a-input-number :min="1" :default-value="5" /> - <a-input-number :min="1" :default-value="10" /> 秒
+                       <a-input-number v-model:value="intervalMin" :min="1" :precision="0" style="width: 80px" />
+                       <span style="margin: 0 8px">-</span>
+                       <a-input-number v-model:value="intervalMax" :min="1" :precision="0" style="width: 80px" />
+                       <span style="margin-left: 8px">随机休眠</span>
                     </div>
                  </div>
                </div>
@@ -356,7 +375,9 @@ import {
   LinkOutlined,
   FileTextOutlined,
   KeyOutlined,
-  LeftOutlined
+  LeftOutlined,
+  DeleteOutlined,
+  InfoCircleOutlined
 } from '@ant-design/icons-vue';
 import { message, Modal, Grid, theme } from 'ant-design-vue';
 import axios from 'axios';
@@ -379,13 +400,14 @@ const pagination = reactive({
   pageSize: 50,
   total: 0,
   showSizeChanger: true,
-  pageSizeOptions: ['10', '20', '50', '100'],
+  pageSizeOptions: ['10', '20', '50', '100', '500', '1000'],
 });
 
 const filterStatus = ref<string | undefined>(undefined);
 const searchQuery = ref('');
 const selectedRowKeys = ref<any[]>([]);
-const targetDir = ref('');
+const intervalMin = ref(5);
+const intervalMax = ref(10);
 const systemSaveDir = ref('/分享保存');
 
 // Upload & Mapping
@@ -547,14 +569,11 @@ const handleMappingOk = async () => {
 
 const handleStartTask = async () => {
   if (!currentTaskId.value) return;
-  if (!targetDir.value) {
-    message.warning('请输入目标目录');
-    return;
-  }
   try {
     await axios.post(`/api/excel/tasks/${currentTaskId.value}/start`, {
       item_ids: selectedRowKeys.value,
-      target_dir: targetDir.value
+      interval_min: intervalMin.value,
+      interval_max: intervalMax.value
     });
     message.success('正在启动转存分享...');
     await fetchTasks();
@@ -591,23 +610,49 @@ const handleCancelTask = async () => {
   });
 };
 
-const handleDeleteTask = () => {
-  if (!currentTaskId.value) return;
+const handleDeleteTask = (taskId?: number) => {
+  const targetId = taskId || currentTaskId.value;
+  if (!targetId) return;
+  
   Modal.confirm({
     title: '确认删除任务？',
     content: '此操作将彻底删除任务及其所有链接记录，是否继续？',
     okType: 'danger',
     onOk: async () => {
       try {
-        await axios.delete(`/api/excel/tasks/${currentTaskId.value}`);
+        await axios.delete(`/api/excel/tasks/${targetId}`);
         message.success('任务已删除');
-        currentTaskId.value = null;
+        if (currentTaskId.value === targetId) {
+          currentTaskId.value = null;
+        }
         await fetchTasks();
       } catch (e) {
         message.error('删除失败');
       }
     }
   });
+};
+
+const getStatusText = (status: string) => {
+  const map: any = {
+    'wait': '待处理',
+    'running': '运行中',
+    'paused': '已暂停',
+    'completed': '已完成',
+    'cancelled': '已取消'
+  };
+  return map[status] || status;
+};
+
+const getStatusTagColor = (status: string) => {
+  const map: any = {
+    'wait': 'default',
+    'running': 'processing',
+    'paused': 'warning',
+    'completed': 'success',
+    'cancelled': 'error'
+  };
+  return map[status] || 'default';
 };
 
 const handleTableChange = (pag: any) => {
@@ -725,12 +770,32 @@ onUnmounted(() => {
 }
 
 .sidebar-header {
-  padding: 16px;
-  font-weight: bold;
+  height: 64px;
+  padding: 0 16px;
   display: flex;
   justify-content: space-between;
   align-items: center;
   border-bottom: 1px solid v-bind('antdToken.colorBorderSecondary');
+  flex-shrink: 0;
+}
+
+.sidebar-header span {
+  font-size: 16px;
+  font-weight: bold;
+}
+
+.task-count-badge {
+  background: #1890ff;
+  color: white;
+  min-width: 22px;
+  height: 22px;
+  padding: 0 6px;
+  border-radius: 11px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  font-weight: 500;
 }
 
 .sidebar-content {
@@ -740,42 +805,91 @@ onUnmounted(() => {
 }
 
 .task-item {
-  padding: 12px 16px;
   display: flex;
   align-items: center;
-  gap: 12px;
+  padding: 12px;
+  margin: 12px;
+  border-radius: 12px;
   cursor: pointer;
-  transition: all 0.3s;
+  transition: all 0.2s;
+  border: 1px solid v-bind('antdToken.colorBorderSecondary');
+  position: relative;
+  background: v-bind('antdToken.colorBgContainer');
 }
 
 .task-item:hover {
-  background: v-bind('antdToken.colorFillAlter');
+  background: v-bind('antdToken.colorFillTertiary');
+  border-color: v-bind('antdToken.colorPrimary');
 }
 
 .task-item.active {
-  background: v-bind('antdToken.controlItemBgActive');
-  border-right: 3px solid v-bind('antdToken.colorPrimary');
+  background: v-bind('antdToken.colorFillTertiary');
+  border-color: v-bind('antdToken.colorPrimary');
+  box-shadow: 0 0 0 1px v-bind('antdToken.colorPrimary');
 }
 
-.task-icon {
-  font-size: 20px;
-  color: #27ae60;
+.task-icon-container {
+  margin-right: 12px;
+}
+
+.excel-icon-box {
+  width: 48px;
+  height: 48px;
+  background: #228b22;
+  border-radius: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: white;
+  font-size: 24px;
+}
+
+.task-info {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.task-name-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
 }
 
 .task-name {
-  font-size: 14px;
-  font-weight: 500;
+  font-size: 15px;
+  font-weight: 600;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  max-width: 180px;
+  color: v-bind('antdToken.colorText');
 }
 
 .task-meta {
-  font-size: 12px;
   display: flex;
-  gap: 8px;
+  align-items: center;
+  gap: 12px;
+  font-size: 13px;
   color: v-bind('antdToken.colorTextDescription');
+}
+
+.task-item-actions {
+  position: absolute;
+  right: 8px;
+  top: 50%;
+  transform: translateY(-50%);
+  opacity: 0;
+  transition: opacity 0.2s;
+}
+
+.task-item:hover .task-item-actions {
+  opacity: 1;
+}
+
+.delete-item-btn {
+  background: v-bind('antdToken.colorBgBase') !important;
 }
 
 .status-running { color: v-bind('antdToken.colorPrimary'); }

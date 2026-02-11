@@ -6,7 +6,7 @@ from loguru import logger
 import asyncio
 import time
 from contextlib import asynccontextmanager
-from typing import Literal, Optional
+from typing import Literal, Optional, Tuple
 from app.core.database import async_session
 from app.models.schema import PendingLink, LinkHistory
 from sqlalchemy import select, delete
@@ -227,194 +227,212 @@ class P115Service:
         raise RuntimeError(f"无法确保保存目录 {path} 存在 (已重试3次): {last_error}")
 
     async def save_share_link(self, share_url: str, metadata: dict = None, target_dir: Optional[str] = None):
-        """Save a 115 share link to the configured directory
-        
-        Args:
-            share_url: The 115 share URL to save
-            metadata: Optional metadata dict containing description, full_text, photo_id, etc.
-            target_dir: Optional target directory path
-        """
+        """Public API with its own locking"""
         async with self._acquire_task_lock("save_share"):
-            if not self.client:
-                logger.warning("P115Client not initialized, cannot save link")
-                return None
+            return await self._save_share_link_internal(share_url, metadata, target_dir)
+
+    async def save_and_share(self, share_url: str, metadata: dict = None, target_dir: Optional[str] = None):
+        """Unified save and share with a single lock duration"""
+        async with self._acquire_task_lock("save_share"):
+            save_res = await self._save_share_link_internal(share_url, metadata, target_dir)
+            if save_res and save_res.get("status") == "success":
+                # Create share link while still holding the lock
+                share_link = await self.create_share_link(save_res)
+                if share_link:
+                    return {
+                        "status": "success",
+                        "share_link": share_link
+                    }
+                else:
+                    return {
+                        "status": "error",
+                        "error_type": "share_failed",
+                        "message": "转存成功但在由于文件未同步或网络问题，生成分享链接失败"
+                    }
+            return save_res
+
+    async def _save_share_link_internal(self, share_url: str, metadata: dict = None, target_dir: Optional[str] = None):
+        """Internal logic for saving a 115 share link (no locking)"""
+        if not self.client:
+            logger.warning("P115Client not initialized, cannot save link")
+            return None
+        
+        logger.info(f"📥 开始处理分享链接: {share_url}")
+        try:
+            # 1. Extract share/receive codes
+            payload = share_extract_payload(share_url)
             
-            logger.info(f"📥 开始处理分享链接: {share_url}")
-            try:
-                # 1. Extract share/receive codes
-                payload = share_extract_payload(share_url)
-                
-                # 2. Get share snapshot to get file IDs and names (带超时重试)
-                snap_resp = await self._api_call_with_timeout(
-                    self.client.share_snap, payload, async_=True,
-                    timeout=API_TIMEOUT, label="share_snap"
-                )
-                check_response(snap_resp)
+            # 2. Get share snapshot to get file IDs and names (带超时重试)
+            snap_resp = await self._api_call_with_timeout(
+                self.client.share_snap, payload, async_=True,
+                timeout=API_TIMEOUT, label="share_snap"
+            )
+            check_response(snap_resp)
 
-                # Check for audit and violation status
-                data = snap_resp.get("data", {})
-                share_info = data.get("shareinfo" if "shareinfo" in data else "share_info", {})
-                share_state = data.get("share_state", share_info.get("share_state", share_info.get("status"))) # Multiple fallbacks
-                share_title = share_info.get("share_title", "")
-                have_vio_file = share_info.get("have_vio_file", 0)
+            # Check for audit and violation status
+            data = snap_resp.get("data", {})
+            share_info = data.get("shareinfo" if "shareinfo" in data else "share_info", {})
+            share_state = data.get("share_state", share_info.get("share_state", share_info.get("status"))) # Multiple fallbacks
+            share_title = share_info.get("share_title", "")
+            have_vio_file = share_info.get("have_vio_file", 0)
 
-                # 优先判断违规内容，无论审核状态如何
-                if have_vio_file == 1:
-                    logger.warning(f"🚫 分享链接包含违规内容: {share_url}")
-                    return {
-                        "status": "error",
-                        "error_type": "violated",
-                        "message": "链接包含违规内容"
-                    }
-
-                if share_state == 0:
-                    logger.info(f"🔍 分享链接处于审核中，进入轮询等待队列: {share_url}")
-                    # Save to DB for persistence
-                    async with async_session() as session:
-                        new_task = PendingLink(
-                            share_url=share_url,
-                            metadata_json=metadata or {},
-                            status="auditing"
-                        )
-                        session.add(new_task)
-                        await session.commit()
-                        db_id = new_task.id
-                    
-                    return {
-                        "status": "pending",
-                        "share_url": share_url,
-                        "metadata": metadata or {},
-                        "db_id": db_id
-                    }
-                
-                if share_state == 7:
-                    logger.warning(f"⚠️ 分享链接已过期: {share_url}")
-                    return {
-                        "status": "error",
-                        "error_type": "expired",
-                        "message": "链接已过期"
-                    }
-                
-                if share_state != 1:
-                    logger.warning(f"⚠️ 分享链接状态异常 (state={share_state}): {share_url}")
-                    # Allow attempt if state is unknown but not explicitly pending/expired/prohibited
-                
-                items = snap_resp["data"]["list"]
-                if not items:
-                    logger.warning("分享链接内没有文件")
-                    return None
-                
-                # Extract file/folder IDs and names
-                # Files use 'fid', folders use 'cid'
-                fids = []
-                names = []
-                for item in items:
-                    # Try to get fid (file) or cid (folder)
-                    fid = item.get("fid") or item.get("cid")
-                    if fid:
-                        fids.append(str(fid))
-                        names.append(item.get("n", "未知"))
-                    else:
-                        logger.warning(f"Item missing both fid and cid: {item}")
-                
-                if not fids:
-                    logger.error("未能提取到任何有效的文件或文件夹 ID")
-                    return None
-                
-                logger.info(f"📦 检测到 {len(fids)} 个项目: {', '.join(names[:3])}{'...' if len(names) > 3 else ''}")
-                
-                # 3. Ensure save directory (with network recovery retry)
-                #    If _ensure_save_dir fails (e.g. network issue), pause and retry
-                #    for up to 30 minutes instead of discarding the task.
-                to_cid = None
-                max_network_wait = 1800  # 30 minutes
-                network_start = time.time()
-                network_attempt = 0
-                
-                while True:
-                    try:
-                        to_cid = await self._ensure_save_dir(target_dir)
-                        if network_attempt > 0:
-                            logger.info(f"🎉 网络已恢复，继续处理任务 (等待了 {time.time() - network_start:.0f}s)")
-                        break
-                    except Exception as dir_err:
-                        network_attempt += 1
-                        elapsed = time.time() - network_start
-                        remaining = max_network_wait - elapsed
-                        
-                        if remaining <= 0:
-                            logger.error(f"❌ 网盘网络恢复等待超时 (30分钟)，中止任务: {dir_err}")
-                            return {
-                                "status": "error",
-                                "error_type": "dir_failed",
-                                "message": f"网盘网络持续不可用 (已等待30分钟): {dir_err}"
-                            }
-                        
-                        wait_time = min(30, remaining)
-                        logger.warning(
-                            f"⏸️ 网盘网络异常，任务暂停等待恢复 "
-                            f"(第{network_attempt}次重试, 已等待 {elapsed:.0f}s, 剩余 {remaining:.0f}s): {dir_err}"
-                        )
-                        await asyncio.sleep(wait_time)
-                
-                # 4. Receive files
-                receive_payload = {
-                    "share_code": payload["share_code"],
-                    "receive_code": payload["receive_code"] or "",
-                    "file_id": ",".join(fids),
-                    "cid": to_cid
+            # 优先判断违规内容，无论审核状态如何
+            if have_vio_file == 1:
+                logger.warning(f"🚫 分享链接包含违规内容: {share_url}")
+                return {
+                    "status": "error",
+                    "error_type": "violated",
+                    "message": "链接包含违规内容"
                 }
-                
-                try:
-                    recv_resp = await self._api_call_with_timeout(
-                        self.client.share_receive, receive_payload, async_=True,
-                        timeout=API_TIMEOUT, label="share_receive"
+
+            if share_state == 0:
+                logger.info(f"🔍 分享链接处于审核中，进入轮询等待队列: {share_url}")
+                # Save to DB for persistence
+                async with async_session() as session:
+                    new_task = PendingLink(
+                        share_url=share_url,
+                        metadata_json=metadata or {},
+                        status="auditing"
                     )
-                    check_response(recv_resp)
-                    logger.info(f"✅ 链接转存指令已发送: {share_url} -> CID {to_cid}")
-                except Exception as recv_error:
-                    # Check if it's a "file already received" error (errno 4200045)
-                    error_msg = str(recv_error)
-                    if "4200045" in error_msg or "已经接收" in error_msg:
-                        logger.warning(f"⚠️ 115 提示文件该分享已接收过: {share_url}")
-                        # Verify if files really exist in to_cid
-                        found_all = False
-                        try:
-                            # 用 _find_files_in_dir 查找（支持 search + list 双重查找）
-                            found_files = await self._find_files_in_dir(to_cid, names)
-                            found_count = len(found_files)
-                            if found_count > 0:
-                                logger.info(f"✅ 在保存目录中找到 {found_count} 个同名文件，继续处理")
-                                # Continue to share creation with existing files
-                            else:
-                                logger.error("❌ 115 提示已接收，但在保存目录未找到文件（可能已被删除）。无法重新转存同一分享链接。")
-                                return {
-                                    "status": "error",
-                                    "error_type": "already_exists_missing",
-                                    "message": "该分享链接您已转存过。115 限制同一链接无法由于文件丢失而重复转存，请尝试寻找原文件或从回收站还原。"
-                                }
-                        except Exception as check_e:
-                            logger.warning(f"⚠️ 检查文件是否存在时出错: {check_e}")
-                            # Assume failure to be safe
-                            return {
-                                "status": "error", 
-                                "error_type": "unknown",
-                                "message": "保存失败，且无法验证文件是否存在"
-                            }
-                    else:
-                        # Other errors, re-raise
-                        raise
+                    session.add(new_task)
+                    await session.commit()
+                    db_id = new_task.id
                 
                 return {
-                    "status": "success", 
-                    "to_cid": to_cid, 
-                    "names": names,
+                    "status": "pending",
                     "share_url": share_url,
-                    "metadata": metadata or {}  # Include metadata in return value
+                    "metadata": metadata or {},
+                    "db_id": db_id
                 }
-            except Exception as e:
-                logger.error(f"❌ 保存分享链接失败", exc_info=True)
+            
+            if share_state == 7:
+                logger.warning(f"⚠️ 分享链接已过期: {share_url}")
+                return {
+                    "status": "error",
+                    "error_type": "expired",
+                    "message": "链接已过期"
+                }
+            
+            if share_state != 1:
+                logger.warning(f"⚠️ 分享链接状态异常 (state={share_state}): {share_url}")
+                # Allow attempt if state is unknown but not explicitly pending/expired/prohibited
+            
+            items = snap_resp["data"]["list"]
+            if not items:
+                logger.warning("分享链接内没有文件")
                 return None
+            
+            # Extract file/folder IDs and names
+            # Files use 'fid', folders use 'cid'
+            fids = []
+            names = []
+            for item in items:
+                # Try to get fid (file) or cid (folder)
+                fid = item.get("fid") or item.get("cid")
+                if fid:
+                    fids.append(str(fid))
+                    names.append(item.get("n", "未知"))
+                else:
+                    logger.warning(f"Item missing both fid and cid: {item}")
+            
+            if not fids:
+                logger.error("未能提取到任何有效的文件或文件夹 ID")
+                return None
+            
+            logger.info(f"📦 检测到 {len(fids)} 个项目: {', '.join(names[:3])}{'...' if len(names) > 3 else ''}")
+            
+            # 3. Ensure save directory (with network recovery retry)
+            #    If _ensure_save_dir fails (e.g. network issue), pause and retry
+            #    for up to 30 minutes instead of discarding the task.
+            to_cid = None
+            max_network_wait = 1800  # 30 minutes
+            network_start = time.time()
+            network_attempt = 0
+            
+            while True:
+                try:
+                    to_cid = await self._ensure_save_dir(target_dir)
+                    if network_attempt > 0:
+                        logger.info(f"🎉 网络已恢复，继续处理任务 (等待了 {time.time() - network_start:.0f}s)")
+                    break
+                except Exception as dir_err:
+                    network_attempt += 1
+                    elapsed = time.time() - network_start
+                    remaining = max_network_wait - elapsed
+                    
+                    if remaining <= 0:
+                        logger.error(f"❌ 网盘网络恢复等待超时 (30分钟)，中止任务: {dir_err}")
+                        return {
+                            "status": "error",
+                            "error_type": "dir_failed",
+                            "message": f"网盘网络持续不可用 (已等待30分钟): {dir_err}"
+                        }
+                    
+                    wait_time = min(30, remaining)
+                    logger.warning(
+                        f"⏸️ 网盘网络异常，任务暂停等待恢复 "
+                        f"(第{network_attempt}次重试, 已等待 {elapsed:.0f}s, 剩余 {remaining:.0f}s): {dir_err}"
+                    )
+                    await asyncio.sleep(wait_time)
+            
+            # 4. Receive files
+            receive_payload = {
+                "share_code": payload["share_code"],
+                "receive_code": payload["receive_code"] or "",
+                "file_id": ",".join(fids),
+                "cid": to_cid
+            }
+            
+            try:
+                recv_resp = await self._api_call_with_timeout(
+                    self.client.share_receive, receive_payload, async_=True,
+                    timeout=API_TIMEOUT, label="share_receive"
+                )
+                check_response(recv_resp)
+                logger.info(f"✅ 链接转存指令已发送: {share_url} -> CID {to_cid}")
+            except Exception as recv_error:
+                # Check if it's a "file already received" error (errno 4200045)
+                error_msg = str(recv_error)
+                if "4200045" in error_msg or "已经接收" in error_msg:
+                    logger.warning(f"⚠️ 115 提示文件该分享已接收过: {share_url}")
+                    # Verify if files really exist in to_cid
+                    found_all = False
+                    try:
+                        # 用 _find_files_in_dir 查找（支持 search + list 双重查找）
+                        found_files = await self._find_files_in_dir(to_cid, names)
+                        found_count = len(found_files)
+                        if found_count > 0:
+                            logger.info(f"✅ 在保存目录中找到 {found_count} 个同名文件，继续处理")
+                            # Continue to share creation with existing files
+                        else:
+                            logger.error("❌ 115 提示已接收，但在保存目录未找到文件（可能已被删除）。无法重新转存同一分享链接。")
+                            return {
+                                "status": "error",
+                                "error_type": "already_exists_missing",
+                                "message": "该分享链接您已转存过。115 限制同一链接无法由于文件丢失而重复转存，请尝试寻找原文件或从回收站还原。"
+                            }
+                    except Exception as check_e:
+                        logger.warning(f"⚠️ 检查文件是否存在时出错: {check_e}")
+                        # Assume failure to be safe
+                        return {
+                            "status": "error", 
+                            "error_type": "unknown",
+                            "message": "保存失败，且无法验证文件是否存在"
+                        }
+                else:
+                    # Other errors, re-raise
+                    raise
+            
+            return {
+                "status": "success", 
+                "to_cid": to_cid, 
+                "names": names,
+                "share_url": share_url,
+                "metadata": metadata or {}  # Include metadata in return value
+            }
+        except Exception as e:
+            logger.error(f"❌ 保存分享链接失败", exc_info=True)
+            return None
 
     async def get_share_status(self, share_url: str):
         """Check the current status of a share link
@@ -698,28 +716,93 @@ class P115Service:
         """Clean up the save directory by deleting the entire folder.
         It will be automatically recreated by _ensure_save_dir on next save."""
         async with self._acquire_task_lock("cleanup"):
-            logger.info("🧹 开始清理保存目录...")
+            logger.info(f"🧹 开始清理保存目录: {settings.P115_SAVE_DIR}")
             try:
-                save_dir_cid = await self._ensure_save_dir()
-                if not save_dir_cid:
-                    logger.error("无法获取保存目录 CID")
-                    return False
-                # Clear cache since we're deleting the directory
-                self.clear_save_dir_cache()
-
-                # 直接删除整个保存目录文件夹
-                save_path = settings.P115_SAVE_DIR or "/分享保存"
-                logger.info(f"🗑️ 正在删除保存目录: {save_path} (CID: {save_dir_cid})")
-                del_resp = await self._api_call_with_timeout(
-                    self.client.fs_delete, str(save_dir_cid), async_=True,
+                # 1. Get CID of save dir
+                cid = await self._ensure_save_dir()
+                if not cid:
+                    return
+                
+                # 2. Delete the directory
+                resp = await self._api_call_with_timeout(
+                    self.client.fs_delete, cid, async_=True,
                     timeout=API_TIMEOUT, label="fs_delete"
                 )
-                check_response(del_resp)
-                logger.info(f"✅ 保存目录已删除，下次保存时将自动重建")
-                return True
+                check_response(resp)
+                
+                # 3. Clear cache
+                self.clear_save_dir_cache()
+                logger.info(f"✅ 保存目录清理完成")
             except Exception as e:
-                logger.error(f"清理保存目录失败: {e}")
-                return False
+                logger.error(f"❌ 清理目录失败: {e}")
+
+    async def get_storage_stats(self) -> Tuple[int, int]:
+        """Get storage stats (used, total) of 115 Drive in bytes"""
+        if not self.client:
+            return 0, 0
+        try:
+            resp = await self._api_call_with_timeout(
+                self.client.user_space_info, async_=True,
+                timeout=API_TIMEOUT, label="user_space_info"
+            )
+            check_response(resp)
+            # Response: {'state': True, ... 'data': {'all_total': ..., 'all_used': ...}}
+            # Values can be direct numbers or dicts like {'size': ..., 'size_format': ...}
+            data = resp.get("data", {})
+            
+            def extract_size(val) -> int:
+                if isinstance(val, dict):
+                    return int(val.get("size") or val.get("size_total") or 0)
+                try:
+                    return int(val) if val is not None else 0
+                except (ValueError, TypeError):
+                    return 0
+
+            # Try common keys for used space
+            used_val = data.get("all_used") or data.get("all_use")
+            used = extract_size(used_val)
+            
+            # Try common keys for total space
+            total_val = data.get("all_total")
+            total = extract_size(total_val)
+            
+            return used, total
+        except Exception as e:
+            logger.error(f"❌ 获取网盘容量失败: {e}")
+            return 0, 0
+
+    async def check_capacity_and_cleanup(self):
+        """Check current capacity and trigger cleanup if it exceeds limit"""
+        if not settings.P115_CLEANUP_CAPACITY_ENABLED:
+            return
+            
+        limit = settings.P115_CLEANUP_CAPACITY_LIMIT
+        
+        if limit < 1:
+            return
+            
+        # Convert limit (TB) to bytes
+        limit_bytes = limit * (1024**4)
+        
+        used_bytes, total_bytes = await self.get_storage_stats()
+        if total_bytes == 0:
+            return
+            
+        used_tb = used_bytes / (1024**4)
+        total_tb = total_bytes / (1024**4)
+        
+        if used_bytes > limit_bytes:
+            logger.warning(f"⚠️ 网盘容量({used_tb:.2f} TB / {total_tb:.2f} TB)超过设定阈值({limit:.2f} TB)，触发自动清理")
+            await self.cleanup_save_directory()
+            await self.cleanup_recycle_bin()
+            
+            # Re-check capacity after cleanup (wait a bit for 115 API to update)
+            await asyncio.sleep(2)
+            new_used_bytes, new_total_bytes = await self.get_storage_stats()
+            new_used_tb = new_used_bytes / (1024**4)
+            logger.info(f"✨ 清理完成。当前网盘状态: 已用 {new_used_tb:.2f} TB / 总计 {total_tb:.2f} TB (清理前: {used_tb:.2f} TB)")
+        else:
+            logger.info(f"📊 网盘状态: 已用 {used_tb:.2f} TB / 总计 {total_tb:.2f} TB (清理阈值: {limit:.2f} TB)")
 
     async def get_history_link(self, original_url: str) -> str | None:
         """Check if a link has been processed before"""

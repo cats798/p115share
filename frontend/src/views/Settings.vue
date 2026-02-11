@@ -78,6 +78,34 @@
           <a-form-item label="回收站密码" name="p115_recycle_password">
             <a-input-password v-model:value="formState.p115_recycle_password" placeholder="留空则无密码" />
           </a-form-item>
+
+          <a-divider />
+          
+          <a-form-item label="容量自动清理">
+            <template #extra>
+              <div style="font-size: 12px; color: #999; margin-top: 4px">启用后，每半小时检测一次网盘容量，超过限制将自动清理保存目录</div>
+            </template>
+            <a-switch v-model:checked="formState.p115_cleanup_capacity_enabled" />
+          </a-form-item>
+
+          <div v-if="formState.p115_cleanup_capacity_enabled">
+            <a-form-item label="容量清理限制" name="p115_cleanup_capacity_limit">
+              <a-row :gutter="8">
+                <a-col :span="20">
+                  <a-input-number 
+                    v-model:value="formState.p115_cleanup_capacity_limit" 
+                    :min="1" 
+                    :precision="2"
+                    style="width: 100%" 
+                    placeholder="请输入容量值"
+                  >
+                    <template #addonAfter>TB</template>
+                  </a-input-number>
+                </a-col>
+              </a-row>
+              <div style="font-size: 12px; color: #999; margin-top: 4px">最小值为 1 TB</div>
+            </a-form-item>
+          </div>
           
           <a-divider />
           <a-button type="primary" @click="onFinish('p115')" :loading="loading" block>保存 115 配置</a-button>
@@ -179,7 +207,10 @@ const formState = reactive({
   proxy_port: '',
   proxy_user: '',
   proxy_pass: '',
-  proxy_type: 'HTTP'
+  proxy_type: 'HTTP',
+  p115_cleanup_capacity_enabled: false,
+  p115_cleanup_capacity_limit: 0,
+  p115_cleanup_capacity_unit: 'GB'
 });
 
 const addChannel = () => {
@@ -221,6 +252,10 @@ const rules = computed(() => ({
   p115_save_dir: [{ required: true, message: '请输入保存路径', trigger: 'blur' }],
   p115_cleanup_dir_cron: [{ validator: validateCron, trigger: 'blur' }],
   p115_cleanup_trash_cron: [{ validator: validateCron, trigger: 'blur' }],
+  p115_cleanup_capacity_limit: [
+    { required: true, message: '请输入清理容量', trigger: 'blur' },
+    { type: 'number', min: 1, message: '容量限制最小值为 1 TB', trigger: 'blur' }
+  ],
   proxy_host: [{ validator: validateProxyHost, trigger: 'change' }],
   proxy_port: [{ validator: validateProxyPort, trigger: 'change' }]
 }));
@@ -256,6 +291,9 @@ const loadConfig = async () => {
     formState.proxy_user = res.data.proxy_user || '';
     formState.proxy_pass = res.data.proxy_pass || '';
     formState.proxy_type = res.data.proxy_type || 'HTTP';
+    formState.p115_cleanup_capacity_enabled = res.data.p115_cleanup_capacity_enabled || false;
+    formState.p115_cleanup_capacity_limit = res.data.p115_cleanup_capacity_limit || 1;
+    formState.p115_cleanup_capacity_unit = 'TB'; // Support TB only
   } catch (e) {
     console.error(e);
   }
@@ -265,7 +303,11 @@ const onFinish = async (section: 'tg' | 'p115' | 'proxy' = 'tg') => {
   try {
     const sectionFields: Record<string, string[]> = {
       tg: ['tg_bot_token', 'tg_user_id', 'tg_allow_chats'],
-      p115: ['p115_cookie', 'p115_save_dir', 'p115_cleanup_dir_cron', 'p115_cleanup_trash_cron', 'p115_recycle_password'],
+      p115: [
+        'p115_cookie', 'p115_save_dir', 'p115_cleanup_dir_cron', 
+        'p115_cleanup_trash_cron', 'p115_recycle_password',
+        'p115_cleanup_capacity_enabled', 'p115_cleanup_capacity_limit', 'p115_cleanup_capacity_unit'
+      ],
       proxy: ['proxy_enabled', 'proxy_host', 'proxy_port', 'proxy_user', 'proxy_pass', 'proxy_type']
     };
 

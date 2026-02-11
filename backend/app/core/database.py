@@ -2,8 +2,8 @@ import os
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase
 
-# Database path - use absolute path since we know the container structure
-DB_PATH = "/app/data/p115share.db"
+# Database path - use relative path to support both local and docker (mapped via volumes)
+DB_PATH = "data/p115share.db"
 
 # Ensure data directory exists
 os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)

@@ -15,6 +15,7 @@ class CleanupScheduler:
         """Start the scheduler"""
         self.update_cleanup_dir_job()
         self.update_cleanup_trash_job()
+        self.update_cleanup_capacity_job()
         self.scheduler.start()
         logger.info("⏰ 定时清理任务已启动")
 
@@ -58,6 +59,28 @@ class CleanupScheduler:
                 self.scheduler.remove_job(job_id)
                 logger.info("🚫 已移除清空回收站定时任务")
     
+    def update_cleanup_capacity_job(self):
+        """Update or remove the capacity check job based on config"""
+        job_id = "cleanup_capacity_check"
+        if settings.P115_CLEANUP_CAPACITY_ENABLED:
+            try:
+                # 每 30 分钟检查一次容量
+                self.scheduler.add_job(
+                    p115_service.check_capacity_and_cleanup,
+                    'interval',
+                    minutes=30,
+                    id=job_id,
+                    name="自动检测网盘容量",
+                    replace_existing=True
+                )
+                logger.info(f"✅ 已设置容量自动检测任务: 每 30 分钟一次 (阈值: {settings.P115_CLEANUP_CAPACITY_LIMIT} TB)")
+            except Exception as e:
+                logger.error(f"❌ 设置容量自动检测任务失败: {e}")
+        else:
+            if self.scheduler.get_job(job_id):
+                self.scheduler.remove_job(job_id)
+                logger.info("🚫 已移除容量自动检测任务")
+
     def shutdown(self):
         """Shutdown the scheduler"""
         self.scheduler.shutdown()

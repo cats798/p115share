@@ -221,12 +221,11 @@ class TGService:
                     "share_url": share_url,
                     "entities": segment_info["entities"] if segment_info else ser_entities
                 }
-                save_res = await p115_service.save_share_link(share_url, metadata=metadata)
+                save_res = await p115_service.save_and_share(share_url, metadata=metadata)
                 
                 if save_res:
                     if save_res.get("status") == "success":
-                        # 2. Create long-term share
-                        share_link = await p115_service.create_share_link(save_res)
+                        share_link = save_res.get("share_link")
                         if share_link:
                             await p115_service.save_history_link(share_url, share_link)
                             processed_links[share_url] = share_link
@@ -466,11 +465,11 @@ class TGService:
 
             if not status_info["is_auditing"]:  # Audit passed
                 logger.info(f"🎉 链接审核已通过 (status: {status_info['share_state']}): {share_url}")
-                save_res = await p115_service.save_share_link(share_url, metadata=metadata)
+                save_res = await p115_service.save_and_share(share_url, metadata=metadata)
                 
                 if save_res and save_res.get("status") == "success":
                     logger.info(f"✅ 审核通过后转存成功: {share_url}")
-                    share_link = await p115_service.create_share_link(save_res)
+                    share_link = save_res.get("share_link")
                     
                     if share_link:
                         await p115_service.save_history_link(share_url, share_link)

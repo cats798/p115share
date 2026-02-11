@@ -1,4 +1,5 @@
 import asyncio
+import random
 import io
 import pandas as pd
 from datetime import datetime
@@ -8,6 +9,7 @@ from app.core.database import async_session
 from app.models.schema import ExcelTask, ExcelTaskItem
 from app.services.p115 import p115_service
 from app.services.tg_bot import tg_service
+from app.core.config import settings
 
 class ExcelBatchService:
     def __init__(self):
@@ -104,6 +106,8 @@ class ExcelBatchService:
                     break
                 
                 self.active_task_id = task.id
+                interval_min = task.interval_min
+                interval_max = task.interval_max
                 
                 # Get one pending item
                 async with async_session() as session:
@@ -131,22 +135,19 @@ class ExcelBatchService:
                 # Process the item
                 await self._process_item(item_id)
                 
+                # Rate limiting (Random interval)
+                interval = random.randint(interval_min, interval_max)
+                await asyncio.sleep(interval)
+                
             except Exception as e:
                 logger.error(f"Excel 工作线程出错: {e}")
                 await asyncio.sleep(5)
-            
-            # Rate limiting
-            await asyncio.sleep(2)
 
     async def _process_item(self, item_id: int):
         async with async_session() as session:
             result = await session.execute(select(ExcelTaskItem).where(ExcelTaskItem.id == item_id))
             item = result.scalar_one()
             task_id = item.task_id
-            
-            # Get task for target_dir
-            res_task = await session.execute(select(ExcelTask).where(ExcelTask.id == task_id))
-            task = res_task.scalar_one()
             
             original_url = item.original_url
             if not original_url:
@@ -179,16 +180,15 @@ class ExcelBatchService:
                 if item.extraction_code and "?password=" not in url_to_save:
                     url_to_save = f"{url_to_save}?password={item.extraction_code}"
 
-                save_res = await p115_service.save_share_link(
+                save_res = await p115_service.save_and_share(
                     url_to_save, 
                     metadata=metadata,
-                    target_dir=task.target_dir
+                    target_dir=settings.P115_SAVE_DIR
                 )
                 
                 if save_res:
-                    if save_res.get("status") in ["success", "pending"]:
-                        # Create share link
-                        share_link = await p115_service.create_share_link(save_res)
+                    if save_res.get("status") == "success":
+                        share_link = save_res.get("share_link")
                         if share_link:
                             await p115_service.save_history_link(original_url, share_link)
                             item.new_share_url = share_link
@@ -199,13 +199,11 @@ class ExcelBatchService:
                                 msg_content = f"资源名称：{item.title or '未知'}\n分享链接：{share_link}"
                                 await tg_service.broadcast_to_channels({original_url: share_link}, {"full_text": msg_content})
                         else:
-                            # If pending, we mark as success because it's queued in 115
-                            if save_res.get("status") == "pending":
-                                item.status = "成功"
-                                item.error_msg = "已在115审核队列"
-                            else:
-                                item.status = "失败"
-                                item.error_msg = "转存成功但创建分享失败"
+                            item.status = "失败"
+                            item.error_msg = "转存成功但生成分享链接返回为空"
+                    elif save_res.get("status") == "pending":
+                        item.status = "成功"
+                        item.error_msg = "已在115审核队列"
                     else:
                         item.status = "失败"
                         item.error_msg = save_res.get("message", "转存失败")
@@ -244,13 +242,16 @@ class ExcelBatchService:
             )
             await session.commit()
 
-    async def start_task(self, task_id: int, item_ids: list = None, target_dir: str = None):
+    async def start_task(self, task_id: int, item_ids: list = None, interval_min: int = 5, interval_max: int = 10):
         async with async_session() as session:
-            # Update target_dir if provided
-            if target_dir:
-                await session.execute(
-                    update(ExcelTask).where(ExcelTask.id == task_id).values(target_dir=target_dir)
+            # Update intervals and status
+            await session.execute(
+                update(ExcelTask).where(ExcelTask.id == task_id).values(
+                    interval_min=interval_min,
+                    interval_max=interval_max,
+                    status="running"
                 )
+            )
             
             if item_ids:
                 # 将选中的项设为待处理
@@ -268,10 +269,10 @@ class ExcelBatchService:
                         ExcelTaskItem.status == "待处理"
                     ).values(status="跳过")
                 )
+            else:
+                # 如果没有选择特定项，确保原本待处理的项依然是待处理 (应对重新开始已暂停的任务)
+                pass
             
-            await session.execute(
-                update(ExcelTask).where(ExcelTask.id == task_id).values(status="running")
-            )
             await session.commit()
         await self._update_task_counts(task_id)
         await self.start_worker()

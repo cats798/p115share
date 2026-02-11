@@ -31,7 +31,9 @@ class InterceptHandler(logging.Handler):
             depth += 1
         logger.opt(depth=depth, exception=record.exc_info).log(level, record.getMessage())
 
-logging.basicConfig(handlers=[InterceptHandler()], level=0, force=True)
+# Determine log level
+log_level = getattr(logging, settings.LOG_LEVEL.upper(), logging.INFO)
+logging.basicConfig(handlers=[InterceptHandler()], level=log_level, force=True)
 
 # WebSocket Log Broadcaster
 class LogBroadcast:
@@ -77,8 +79,20 @@ log_broadcast = LogBroadcast()
 def websocket_sink(message):
     log_broadcast.broadcast(str(message))
 
-logger.add(websocket_sink, format="{time:YYYY-MM-DD HH:mm:ss} | {level} | {name}:{line} | {message}")
-logger.add(sys.stdout, format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level}</level> | <cyan>{name}:{line}</cyan> | {message}")
+# Create logs directory
+LOG_DIR = "data/logs"
+os.makedirs(LOG_DIR, exist_ok=True)
+
+logger.add(websocket_sink, format="{time:YYYY-MM-DD HH:mm:ss} | {level} | {name}:{line} | {message}", level=settings.LOG_LEVEL)
+logger.add(sys.stdout, format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level}</level> | <cyan>{name}:{line}</cyan> | {message}", level=settings.LOG_LEVEL)
+logger.add(
+    os.path.join(LOG_DIR, "p115share_{time:YYYY-MM-DD}.log"),
+    rotation="00:00",
+    retention="7 days",
+    format="{time:YYYY-MM-DD HH:mm:ss} | {level} | {name}:{line} | {message}",
+    encoding="utf-8",
+    level=settings.LOG_LEVEL
+)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):

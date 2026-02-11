@@ -28,6 +28,11 @@ class Settings(BaseSettings):
     P115_CLEANUP_TRASH_CRON: str = "0 4 * * *"
     P115_RECYCLE_PASSWORD: str = ""
     
+    # Capacity cleanup
+    P115_CLEANUP_CAPACITY_ENABLED: bool = False
+    P115_CLEANUP_CAPACITY_LIMIT: float = 0.0  # Threshold value
+    P115_CLEANUP_CAPACITY_UNIT: str = "GB"    # GB or TB
+    
     # Proxy settings
     PROXY_ENABLED: bool = False
     PROXY_HOST: str = ""
@@ -44,23 +49,43 @@ class Settings(BaseSettings):
             # Create tables
             await conn.run_sync(Base.metadata.create_all)
             
+        # Run migrations using Alembic
+        try:
+            import subprocess
+            import sys
+            logger.info("正在检查并执行数据库迁移 (Alembic)...")
+            result = subprocess.run(
+                [sys.executable, "-m", "alembic", "upgrade", "head"],
+                capture_output=True,
+                text=True,
+                check=True
+            )
+            logger.debug(f"Alembic: {result.stdout}")
+        except Exception as e:
+            logger.error(f"数据库迁移失败: {e}")
+            if hasattr(e, "stderr"):
+                logger.error(f"错误详情: {e.stderr}")
+
         async with async_session() as session:
             # Check if admin exists
-            result = await session.execute(select(UserModel).where(UserModel.username == "admin"))
+            result = await session.execute(
+                select(UserModel).where(UserModel.username == "admin")
+            )
             if not result.scalar_one_or_none():
                 from app.services.auth import get_password_hash
+
                 admin = UserModel(
-                    username="admin", 
+                    username="admin",
                     hashed_password=get_password_hash("admin"),
-                    avatar_url="/logo.png"
+                    avatar_url="/logo.png",
                 )
                 session.add(admin)
                 logger.info("Default admin user created (admin/admin)")
-            
+
             # Check if we need to migrate or add missing settings
             await self._ensure_all_settings_exist(session)
             await self._load_from_db(session)
-            
+
             await session.commit()
 
     async def _ensure_all_settings_exist(self, session):
@@ -89,6 +114,8 @@ class Settings(BaseSettings):
                 try:
                     if field_type == int:
                         setattr(self, row.key, int(row.value))
+                    elif field_type == float:
+                        setattr(self, row.key, float(row.value))
                     elif field_type == bool:
                         setattr(self, row.key, row.value.lower() == "true")
                     else:
