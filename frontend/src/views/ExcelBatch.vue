@@ -9,27 +9,20 @@
               <template #icon><FileExcelOutlined /></template>
             </a-avatar>
             <div class="header-text">
-              <h1>Excel批量转存分享</h1>
-              <p>上传包含分享链接的Excel文件，批量转存并同步分享链接</p>
+              <h1>文件批量转存分享</h1>
+              <p>上传包含分享链接的 Excel 或 JSON 文件，批量转存并同步分享链接</p>
             </div>
           </div>
           <div class="header-right">
             <a-space>
-              <a-button @click="downloadTemplate">
+              <a-button @click="downloadExcelTemplate">
                 <template #icon><DownloadOutlined /></template>
-                下载模板
+                下载 Excel 模板
               </a-button>
-              <a-upload
-                name="file"
-                :show-upload-list="false"
-                :before-upload="handleBeforeUpload"
-                accept=".xlsx,.xls,.csv"
-              >
-                <a-button type="primary">
-                  <template #icon><UploadOutlined /></template>
-                  上传Excel
-                </a-button>
-              </a-upload>
+              <a-button @click="downloadJsonTemplate">
+                <template #icon><DownloadOutlined /></template>
+                下载 JSON 模板
+              </a-button>
             </a-space>
           </div>
         </div>
@@ -40,16 +33,16 @@
                 name="file"
                 :show-upload-list="false"
                 :before-upload="handleBeforeUpload"
-                accept=".xlsx,.xls,.csv"
+                accept=".xlsx,.xls,.csv,.json"
               >
                 <p class="ant-upload-drag-icon">
                   <FileExcelOutlined style="color: #27ae60; font-size: 64px" />
                 </p>
-                <h2 class="ant-upload-text">请选择或上传一个任务</h2>
-                <p class="ant-upload-hint">上传包含分享链接的Excel文件，批量转存并同步分享链接</p>
+                <h2 class="ant-upload-text">请选择文件上传</h2>
+                <p class="ant-upload-hint">支持 Excel (.xlsx, .xls, .csv) 和 Telegram 导出 (.json) 文件</p>
                 <a-button type="primary" size="large" style="margin-top: 24px">
                   <template #icon><UploadOutlined /></template>
-                  上传Excel文件
+                  上传文件
                 </a-button>
               </a-upload-dragger>
           </div>
@@ -115,11 +108,11 @@
               name="file"
               :show-upload-list="false"
               :before-upload="handleBeforeUpload"
-              accept=".xlsx,.xls,.csv"
+              accept=".xlsx,.xls,.csv,.json"
             >
               <a-button type="primary" block>
                 <template #icon><UploadOutlined /></template>
-                上传Excel
+                上传文件
               </a-button>
             </a-upload>
           </div>
@@ -135,7 +128,7 @@
                <span class="task-title">{{ currentTask?.name }}</span>
              </div>
              <div class="header-right">
-                <a-button ghost danger @click="handleDeleteTask" size="small">删除任务</a-button>
+                <a-button ghost danger @click="handleDeleteTask()" size="small">删除任务</a-button>
              </div>
           </div>
 
@@ -308,7 +301,7 @@
     <!-- Column Mapping Modal -->
     <a-modal
       v-model:open="mappingModalVisible"
-      title="选择Excel列映射"
+      title="文件列映射"
       @ok="handleMappingOk"
       :confirmLoading="creatingTask"
       width="800px"
@@ -710,8 +703,12 @@ const handleTableChange = (page: number, pageSize: number) => {
 
 // selectAll removed
 
-const downloadTemplate = () => {
+const downloadExcelTemplate = () => {
   window.open('/static/template/分享链接导入模板.xlsx', '_blank');
+};
+
+const downloadJsonTemplate = () => {
+  window.open('/static/template/telegram_template.json', '_blank');
 };
 
 const getStatusColor = (status: string) => {

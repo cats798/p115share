@@ -22,7 +22,7 @@
         </a-menu-item>
         <a-menu-item key="excel" @click="currentView = 'excel'">
           <template #icon><FileExcelOutlined /></template>
-          <span>Excel批量转存</span>
+          <span>批量转存分享</span>
         </a-menu-item>
         <a-menu-item key="settings" @click="currentView = 'settings'">
           <template #icon><SettingOutlined /></template>
@@ -55,7 +55,7 @@
         </a-menu-item>
         <a-menu-item key="excel" @click="currentView = 'excel'">
           <template #icon><FileExcelOutlined /></template>
-          <span>Excel批量转存</span>
+          <span>批量转存分享</span>
         </a-menu-item>
         <a-menu-item key="settings" @click="currentView = 'settings'">
           <template #icon><SettingOutlined /></template>

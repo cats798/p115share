@@ -29,9 +29,12 @@ class ExcelBatchService:
         raise Exception("无法识别CSV文件编码，请确保文件是 UTF-8 或 GBK 格式")
 
     async def parse_file(self, content: bytes, filename: str):
-        """Parse Excel/CSV file and return headers and sample data"""
+        """Parse Excel/CSV/JSON file and return headers and sample data"""
         try:
-            if filename.endswith('.csv'):
+            if filename.endswith('.json'):
+                data = self._parse_telegram_json(content)
+                df = pd.DataFrame(data)
+            elif filename.endswith('.csv'):
                 df = self._read_csv(content)
             else:
                 df = pd.read_excel(io.BytesIO(content))
@@ -50,10 +53,137 @@ class ExcelBatchService:
             logger.error(f"解析文件失败 {filename}: {e}")
             raise Exception(f"解析文件失败: {str(e)}")
 
+    builder_functions = {
+        'bold': lambda t: t,
+        'italic': lambda t: t,
+        'underline': lambda t: t,
+        'strikethrough': lambda t: t,
+        'code': lambda t: t,
+        'pre': lambda t: t,
+        'text_link': lambda t: t,
+        'mention': lambda t: t,
+        'hashtag': lambda t: t,
+        'cashtag': lambda t: t,
+        'bot_command': lambda t: t,
+        'email': lambda t: t,
+        'phone_number': lambda t: t,
+        'blockquote': lambda t: t,
+        'spoiler': lambda t: t,
+    }
+
+    def _parse_telegram_json(self, content: bytes):
+        """Parse Telegram export JSON and extract links, titles, and original message format"""
+        import json
+        import re
+        
+        try:
+            data = json.loads(content)
+            messages = data.get('messages', [])
+            extracted_data = []
+            
+            # Regex for 115 links: 115.com/s/ or 115cdn.com/s/
+            link_pattern = re.compile(r'https?://(?:115\.com|115cdn\.com)/s/([a-z0-9]+)(?:\?password=([a-z0-9]+))?')
+            
+            for msg in messages:
+                text_entities = msg.get('text_entities', [])
+                if not text_entities:
+                    continue
+                    
+                # 1. Reconstruct full_text and entities for the message
+                full_text = ""
+                entities = []
+                
+                # We need to track the current offset in UTF-16 code units
+                def get_u16_len(s):
+                    return len(s.encode('utf-16-le')) // 2
+
+                current_offset = 0
+                for entity in text_entities:
+                    entity_text = entity.get('text', '')
+                    entity_type = entity.get('type')
+                    
+                    if not entity_text:
+                        continue
+                        
+                    length = get_u16_len(entity_text)
+                    
+                    # Mapping Telegram types to Aiogram types
+                    tg_to_aio = {
+                        'bold': 'bold',
+                        'italic': 'italic',
+                        'underline': 'underline',
+                        'strikethrough': 'strikethrough',
+                        'code': 'code',
+                        'pre': 'pre',
+                        'text_link': 'text_link',
+                        'mention': 'mention',
+                        'hashtag': 'hashtag',
+                        'cashtag': 'cashtag',
+                        'bot_command': 'bot_command',
+                        'email': 'email',
+                        'phone_number': 'phone_number',
+                        'blockquote': 'blockquote',
+                        'spoiler': 'spoiler',
+                    }
+                    
+                    if entity_type in tg_to_aio:
+                        ent_data = {
+                            "type": tg_to_aio[entity_type],
+                            "offset": current_offset,
+                            "length": length
+                        }
+                        if entity_type == 'text_link':
+                            ent_data["url"] = entity.get('href')
+                        
+                        entities.append(ent_data)
+                    
+                    full_text += entity_text
+                    current_offset += length
+
+                # 2. Extract specific 115 links from the reconstructed entities
+                title = None
+                # First bold entity as title fallback
+                for entity in text_entities:
+                    if entity.get('type') == 'bold' and not title:
+                        title = entity.get('text', '').strip()
+                        title = re.sub(r'^[🎬🎥🎞️📀📁]\s*', '', title)
+                        break
+
+                for entity in text_entities:
+                    if entity.get('type') == 'text_link':
+                        href = entity.get('href', '')
+                        match = link_pattern.search(href)
+                        if match:
+                            share_code = match.group(1)
+                            password = match.group(2)
+                            
+                            current_title = title or f"Message_{msg.get('id')}"
+
+                            extracted_data.append({
+                                "链接": href,
+                                "标题": current_title,
+                                "提取码": password or "",
+                                "item_metadata": {
+                                    "full_text": full_text,
+                                    "entities": entities
+                                }
+                            })
+            
+            if not extracted_data:
+                raise Exception("未在 JSON 文件中找到有效的 115 分享链接")
+            
+            return extracted_data
+        except Exception as e:
+            logger.exception(f"解析 Telegram JSON 失败")
+            raise Exception(f"解析 Telegram JSON 失败: {str(e)}")
+
     async def create_task(self, filename: str, mapping: dict, content: bytes):
         """Create task and items based on mapping"""
         try:
-            if filename.endswith('.csv'):
+            if filename.endswith('.json'):
+                data = self._parse_telegram_json(content)
+                df = pd.DataFrame(data)
+            elif filename.endswith('.csv'):
                 df = self._read_csv(content)
             else:
                 df = pd.read_excel(io.BytesIO(content))
@@ -84,6 +214,7 @@ class ExcelBatchService:
                         original_url=str(row[link_col]) if row[link_col] else "",
                         title=str(row[title_col]) if title_col and row[title_col] else None,
                         extraction_code=str(row[code_col]) if code_col and row[code_col] else None,
+                        item_metadata=row.get('item_metadata') if 'item_metadata' in row else None,
                         status="待处理"
                     )
                     session.add(item)
@@ -230,15 +361,24 @@ class ExcelBatchService:
                 await session.commit()
                 await self._update_task_counts(task_id)
                 if tg_service:
-                    msg_content = f"资源名称：{item.title or '未知'}\n分享链接：{history_url}"
-                    await tg_service.broadcast_to_channels({original_url: history_url}, {"full_text": msg_content})
+                    if item.item_metadata:
+                        await tg_service.broadcast_to_channels({original_url: history_url}, item.item_metadata)
+                    else:
+                        msg_content = f"资源名称：{item.title or '未知'}\n分享链接：{history_url}"
+                        await tg_service.broadcast_to_channels({original_url: history_url}, {"full_text": msg_content})
                 return
 
             try:
-                metadata = {
-                    "description": item.title or "Excel Batch Import",
-                    "share_url": original_url
-                }
+                # Prepare metadata for broadcasting
+                if item.item_metadata:
+                    metadata = item.item_metadata.copy()
+                    metadata["share_url"] = original_url
+                else:
+                    metadata = {
+                        "description": item.title or "Excel Batch Import",
+                        "full_text": f"云盘分享\n资源名称：{item.title or '未知'}\n分享链接：{{{{share_link}}}}",
+                        "share_url": original_url
+                    }
                 
                 # Combine password if present for saving
                 url_to_save = original_url
@@ -261,8 +401,13 @@ class ExcelBatchService:
                             
                             # Broadcast to channels
                             if tg_service:
-                                msg_content = f"资源名称：{item.title or '未知'}\n分享链接：{share_link}"
-                                await tg_service.broadcast_to_channels({original_url: share_link}, {"full_text": msg_content})
+                                if item.item_metadata:
+                                    # Use the stored format
+                                    await tg_service.broadcast_to_channels({original_url: share_link}, metadata)
+                                else:
+                                    # Use default simple format
+                                    msg_content = f"云盘分享\n资源名称：{item.title or '未知'}\n分享链接：{share_link}"
+                                    await tg_service.broadcast_to_channels({original_url: share_link}, {"full_text": msg_content})
                         else:
                             item.status = "失败"
                             item.error_msg = "转存成功但生成分享链接返回为空"
@@ -276,6 +421,7 @@ class ExcelBatchService:
                     item.status = "失败"
                     item.error_msg = "转存服务无响应"
             except Exception as e:
+                logger.exception(f"处理项目失败: {item_id}")
                 item.status = "失败"
                 item.error_msg = str(e)
             

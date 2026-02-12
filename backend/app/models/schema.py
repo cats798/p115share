@@ -67,4 +67,5 @@ class ExcelTaskItem(Base):
     status: Mapped[str] = mapped_column(String(20), default="待处理")  # 待处理, 处理中, 成功, 失败, 跳过
     new_share_url: Mapped[str] = mapped_column(String(255), nullable=True)
     error_msg: Mapped[str] = mapped_column(Text, nullable=True)
+    item_metadata: Mapped[dict] = mapped_column(JSON, nullable=True)  # Store original message text and entities
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
