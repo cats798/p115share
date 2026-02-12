@@ -402,7 +402,9 @@ class P115Service:
             
             # 4. Receive files
             # 💡 增加预检：在大文件保存前尝试清理
-            await self.check_and_prepare_capacity(file_count=len(fids))
+            # 提取分享的总大小用于精准容量判断
+            total_size = share_info.get("file_size", 0)
+            await self.check_and_prepare_capacity(file_count=len(fids), total_size=total_size)
             # 重新获取最新的 CID，以防清理逻辑删除了目录并重建了它
             to_cid = await self._ensure_save_dir(target_dir)
 
@@ -605,8 +607,7 @@ class P115Service:
                         logger.error(f"❌ 中转分享生成失败: {share_e}")
 
                     # 执行清理
-                    await self.cleanup_save_directory()
-                    await self.cleanup_recycle_bin()
+                    await self._do_cleanup_logic()
                     logger.info("🧹 中转清理完成，等待 5 秒恢复...")
                     await asyncio.sleep(5)
                     
@@ -941,30 +942,32 @@ class P115Service:
             return None
 
     async def cleanup_save_directory(self, wait: bool = True):
-        """Clean up the save directory by deleting the entire folder.
-        It will be automatically recreated by _ensure_save_dir on next save.
-        """
+        """Clean up the save directory by deleting the entire folder (with locking)."""
         try:
             async with self._acquire_task_lock("cleanup", wait=wait):
-                logger.info(f"🧹 开始清理保存目录: {settings.P115_SAVE_DIR}")
-                # ... rest of logic remains but we use _ensure_save_dir logic ...
-                cid = await self._ensure_save_dir()
-                if not cid:
-                    return False
-                
-                resp = await self._api_call_with_timeout(
-                    self.client.fs_delete, cid, async_=True,
-                    timeout=API_TIMEOUT, label="fs_delete"
-                )
-                check_response(resp)
-                
-                self.clear_save_dir_cache()
-                logger.info("✅ 保存目录清理完成")
-                return True
+                return await self._cleanup_save_directory_internal()
         except BlockingIOError:
             return False
+
+    async def _cleanup_save_directory_internal(self) -> bool:
+        """Internal logic to clean up the save directory (no locking)."""
+        try:
+            logger.info(f"🧹 开始清理保存目录: {settings.P115_SAVE_DIR}")
+            cid = await self._ensure_save_dir()
+            if not cid:
+                return False
+            
+            resp = await self._api_call_with_timeout(
+                self.client.fs_delete, cid, async_=True,
+                timeout=API_TIMEOUT, label="fs_delete"
+            )
+            check_response(resp)
+            
+            self.clear_save_dir_cache()
+            logger.info("✅ 保存目录清理完成")
+            return True
         except Exception as e:
-            logger.error(f"❌ 清理保存目录失败: {e}")
+            logger.error(f"❌ 内部清理保存目录失败: {e}")
             return False
 
     async def get_storage_stats(self) -> Tuple[int, int]:
@@ -997,40 +1000,39 @@ class P115Service:
             logger.error("❌ 获取网盘容量失败: {}", str(e))
             return 0, 0
 
-    async def check_and_prepare_capacity(self, file_count: int = 0):
-        """Check capacity and optionally clean up before starting a task.
+    async def check_and_prepare_capacity(self, file_count: int = 0, total_size: int = 0):
+        """Check capacity and optionally clean up before starting a task (internal/no-lock).
+        
         Trigger cleanup if:
-        1. file_count > 500 (Batch mode)
-        2. Space is tighter than configured threshold
+        1. file_count > 500 AND total_size > remainder (Avoid predictive cleanup if space is enough)
+        2. Space is tighter than configured threshold (Target maintenance)
         """
         if not settings.P115_CLEANUP_CAPACITY_ENABLED:
-            return
-
-        # 1. Check if we should clean up based on file count (predictive)
-        if file_count > 500:
-            logger.info(f"🚀 检测到批量保存任务 (文件数: {file_count})，执行预防性清理...")
-            await self.cleanup_save_directory()
-            await self.cleanup_recycle_bin()
-            await asyncio.sleep(3) # Wait for 115 to sync
-            return
-
-        # 2. Check current capacity
-        limit = settings.P115_CLEANUP_CAPACITY_LIMIT
-        if limit <= 0:
             return
 
         used_bytes, total_bytes = await self.get_storage_stats()
         if total_bytes == 0:
             return
+            
+        remaining_bytes = total_bytes - used_bytes
 
-        limit_bytes = limit * (1024**4) if settings.P115_CLEANUP_CAPACITY_UNIT == "TB" else limit * (1024**3)
+        # 1. Predictive cleanup for batch tasks
+        # Only cleanup if we have many files AND they might not fit
+        if file_count > 500 and total_size > remaining_bytes:
+            logger.info(f"🚀 预测性清理：检测到大批量文件 ({file_count} 个, {total_size/(1024**3):.2f}GB)，剩余空间不足，执行清理...")
+            await self._do_cleanup_logic()
+            await asyncio.sleep(3) # Wait for 115 to sync
+            return
+
+        # 2. Threshold-based maintenance cleanup
+        # Modified: Only cleanup if the new file(s) won't fit, regardless of threshold
+        # If total_size is 0 (unknown), we skip cleanup unless we are critically low (e.g. < 1GB)
+        # But per user request: "remove the logic that cleans up just because it's over threshold"
         
-        if used_bytes > limit_bytes:
-            used_val = used_bytes / (1024**4) if settings.P115_CLEANUP_CAPACITY_UNIT == "TB" else used_bytes / (1024**3)
-            logger.warning(f"⚠️ 网盘容量({used_val:.2f} {settings.P115_CLEANUP_CAPACITY_UNIT})超过设定阈值，执行清理...")
-            await self.cleanup_save_directory()
-            await self.cleanup_recycle_bin()
-            await asyncio.sleep(3)
+        if total_size > 0 and total_size > remaining_bytes:
+             logger.warning(f"⚠️ 剩余空间不足 (需 {total_size/(1024**3):.2f}GB, 剩 {remaining_bytes/(1024**3):.2f}GB)，执行清理...")
+             await self._do_cleanup_logic()
+             await asyncio.sleep(3)
 
     async def check_capacity_and_cleanup(self, mode: str = "manual"):
         """Check current capacity and trigger cleanup if it exceeds limit.
@@ -1096,37 +1098,14 @@ class P115Service:
                     logger.info("⏭️ 定时容量检查：转存锁获取冲突，按计划跳过任务")
                 return False
         else:
-            if mode != "batch": # Batch mode logs are redundant if we log in worker
-                logger.debug(f"✅ [容量检查] 当前空间充足 ({used_bytes/(1024**4):.2f}TB)，无需清理")
+            # Always log available space for debugging
+            logger.debug(f"✅ [容量检查] 模式: {mode}, 当前空间充足 ({used_bytes/(1024**4):.2f}TB)，无需清理")
         return False
 
     async def _do_cleanup_logic(self):
-        """Internal worker for cleanup without lock management"""
-        # 1. Cleanup directory
-        cid = await self._ensure_save_dir()
-        if cid:
-            try:
-                resp = await self._api_call_with_timeout(
-                    self.client.fs_delete, cid, async_=True,
-                    timeout=API_TIMEOUT, label="fs_delete"
-                )
-                check_response(resp)
-                self.clear_save_dir_cache()
-            except Exception as e:
-                logger.error(f"清理保存目录失败: {e}")
-        
-        # 2. Cleanup recycle bin
-        payload = {}
-        if settings.P115_RECYCLE_PASSWORD:
-            payload["password"] = settings.P115_RECYCLE_PASSWORD
-        try:
-            resp = await self._api_call_with_timeout(
-                self.client.recyclebin_clean_app, payload, async_=True,
-                timeout=API_TIMEOUT, label="recyclebin_clean"
-            )
-            check_response(resp)
-        except Exception as e:
-            logger.error(f"清空回收站失败: {e}")
+        """Helper to execute both cleanup tasks without lock acquisition."""
+        await self._cleanup_save_directory_internal()
+        await self._cleanup_recycle_bin_internal()
 
     async def get_history_link(self, original_url: str) -> Optional[Union[str, list[str]]]:
         """Check if a link has been processed before. Returns string or list of strings."""
@@ -1196,26 +1175,32 @@ class P115Service:
             return False
 
     async def cleanup_recycle_bin(self, wait: bool = True):
-        """Empty the recycle bin"""
+        """Empty the recycle bin (with locking)."""
         try:
             async with self._acquire_task_lock("cleanup", wait=wait):
-                logger.info("🗑️ 开始清空回收站...")
-                payload = {}
-                if settings.P115_RECYCLE_PASSWORD:
-                    payload["password"] = settings.P115_RECYCLE_PASSWORD
-                    logger.debug("使用回收站密码")
-                
-                resp = await self._api_call_with_timeout(
-                    self.client.recyclebin_clean_app, payload, async_=True,
-                    timeout=API_TIMEOUT, label="recyclebin_clean"
-                )
-                check_response(resp)
-                logger.info("✅ 回收站已清空")
-                return True
+                return await self._cleanup_recycle_bin_internal()
         except BlockingIOError:
             return False
+
+    async def _cleanup_recycle_bin_internal(self) -> bool:
+        """Internal logic to empty the recycle bin (no locking)."""
+        try:
+            logger.info("🗑️ 开始清空回收站...")
+            payload = {}
+            if settings.P115_RECYCLE_PASSWORD:
+                payload["password"] = settings.P115_RECYCLE_PASSWORD
+                logger.debug("使用回收站密码")
+            
+            resp = await self._api_call_with_timeout(
+                self.client.recyclebin_clean_app, payload, async_=True,
+                timeout=API_TIMEOUT, label="recyclebin_clean"
+            )
+            check_response(resp)
+            logger.info("✅ 回收站已清空")
+            return True
         except Exception as e:
-            logger.error("❌ 清空回收站失败: {}", e)
+            logger.error("❌ 内部清空回收站失败: {}", e)
             return False
 
+    
 p115_service = P115Service()

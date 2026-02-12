@@ -302,12 +302,6 @@ class ExcelBatchService:
                         # Process the item
                         await self._process_item(item_id)
                         
-                        # 🚦 每次成功处理后，检查网盘容量
-                        try:
-                            await p115_service.check_capacity_and_cleanup(mode="batch")
-                            logger.debug(f"ℹ️ [{item_id}] 批量任务后置容量检查已完成")
-                        except Exception as ce:
-                            logger.error(f"批量任务后置容量检查失败: {ce}")
                     finally:
                         # Find next row and set is_waiting to True before sleep
                         if item_id:
@@ -340,8 +334,25 @@ class ExcelBatchService:
                 
                 # Rate limiting (Random interval)
 
+                # Rate limiting (Random interval) with capacity check
                 interval = random.randint(interval_min, interval_max)
-                await asyncio.sleep(interval)
+                
+                # 利用等待时间检查容量 (不占用转存时间，且无锁冲突)
+                start_check = datetime.now()
+                try:
+                    # mode="batch" 包含 10% 兜底逻辑
+                    await p115_service.check_capacity_and_cleanup(mode="batch")
+                except Exception as ce:
+                    logger.error(f"批量任务间隙容量检查失败: {ce}")
+                
+                # 计算剩余需要 sleep 的时间
+                elapsed = (datetime.now() - start_check).total_seconds()
+                remaining_sleep = interval - elapsed
+                
+                if remaining_sleep > 0:
+                    await asyncio.sleep(remaining_sleep)
+                else:
+                    logger.debug(f"容量检查耗时 {elapsed:.2f}s > 间隔 {interval}s，跳过额外等待")
                 
             except Exception as e:
                 logger.error(f"Excel 工作线程出错: {e}")
