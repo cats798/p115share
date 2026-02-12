@@ -494,6 +494,17 @@ class P115Service:
             logger.debug(f"📊 检查链接状态: {share_url} -> {res}")
             return res
         except Exception as e:
+            error_msg = str(e)
+            # 检查是否为链接失效错误 (errno 4100009)
+            if "4100009" in error_msg or "链接已失效" in error_msg:
+                logger.warning(f"⏰ 检查链接状态发现链接已失效: {share_url}")
+                return {
+                    "share_state": 7,
+                    "is_auditing": False,
+                    "is_expired": True,
+                    "is_prohibited": False,
+                    "title": ""
+                }
             logger.error(f"❌ 检查链接状态失败: {share_url}, 错误: {e}")
             return None
 
@@ -614,23 +625,29 @@ class P115Service:
         names = save_result.get("names", [])
         
         try:
-            # 5. Wait for 10 seconds as requested
-            logger.info(f"⏳ 等待 10 秒以确保文件保存完成...")
-            await asyncio.sleep(10)
+            # 5. Wait for a short time to allow 115 to start processing
+            logger.info(f"⏳ 等待 2 秒以确保文件保存开始...")
+            await asyncio.sleep(2)
             
             # 6. Find files with polling (using search + list as fallback)
             new_fids = []
             matched_files = []
             
-            max_poll_attempts = 5
+            max_poll_attempts = 10  # 增加尝试次数，但由于间隔缩短，总时间其实减少了
             for poll_attempt in range(1, max_poll_attempts + 1):
                 try:
-                    logger.info(f"🔍 开始查找文件 (第 {poll_attempt}/{max_poll_attempts} 次), 目标目录 CID: {to_cid}, 查找: {names}")
+                    logger.info(f"🔍 正在查找文件 (第 {poll_attempt}/{max_poll_attempts} 次), 目标目录 CID: {to_cid}")
                     current_matched = await self._find_files_in_dir(to_cid, names)
                     
                     if current_matched:
+                        # 优化：如果找到的所有文件名和预期一致且数量相等，立即认为完成
+                        if len(current_matched) == len(names):
+                            logger.info(f"✅ 文件已全部到达，共 {len(current_matched)} 个，立即继续")
+                            new_fids = [f["fid"] for f in current_matched]
+                            break
+                        
+                        # 如果还没凑齐，再对比下状态是否稳定（旧逻辑作为保底）
                         if matched_files:
-                            # Compare with previous poll
                             stable = len(current_matched) == len(matched_files)
                             if stable:
                                 for curr, prev in zip(sorted(current_matched, key=lambda x: x["fid"]), 
@@ -649,11 +666,11 @@ class P115Service:
                         matched_files = current_matched
                         
                         if poll_attempt < max_poll_attempts:
-                            await asyncio.sleep(5)
+                            await asyncio.sleep(2)
                     else:
                         logger.warning(f"⚠️ 轮询未找到文件 (第 {poll_attempt}/{max_poll_attempts} 次)")
                         if poll_attempt < max_poll_attempts:
-                            await asyncio.sleep(5)
+                            await asyncio.sleep(2)
                             
                 except Exception as e:
                     logger.warning(f"⚠️ 查找文件失败 (轮询 {poll_attempt}/{max_poll_attempts}): {e}")
