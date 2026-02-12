@@ -1,12 +1,14 @@
 from p115client import P115Client, check_response
 from p115client.fs import P115FileSystem
 from p115client.util import share_extract_payload
+from p115client.tool import share_iterdir_walk
 from app.core.config import settings
 from loguru import logger
 import asyncio
 import time
+import random
 from contextlib import asynccontextmanager
-from typing import Literal, Optional, Tuple
+from typing import Literal, Optional, Tuple, Union
 from app.core.database import async_session
 from app.models.schema import PendingLink, LinkHistory
 from sqlalchemy import select, delete
@@ -102,18 +104,22 @@ class P115Service:
             self.is_connected = False
 
     @asynccontextmanager
-    async def _acquire_task_lock(self, task_type: Literal["save_share", "cleanup"]):
-        """Acquire task lock with timeout.
+    async def _acquire_task_lock(self, task_type: Literal["save_share", "cleanup"], wait: bool = True):
+        """Acquire task lock with optional wait/non-blocking support.
         
-        Uses asyncio.wait_for on the actual lock acquisition instead of
-        polling, which is both more efficient and avoids race conditions.
+        Args:
+            task_type: The type of task requesting the lock.
+            wait: If True, wait for the lock. If False and locked, skip execution.
         """
         if self._task_lock is None:
             self._task_lock = asyncio.Lock()
             
-        max_wait = 2100  # 35 minutes max wait (to accommodate network retry)
+        max_wait = 2100  # 35 minutes max wait
         
         if self._task_lock.locked():
+            if not wait:
+                logger.debug(f"⏭️ {task_type} 任务检测到冲突且设置为不等待，自动跳过 (当前占用: {self._current_task})")
+                raise BlockingIOError(f"Task lock busy: {self._current_task}")
             logger.info(f"⏳ {task_type} 任务等待中，当前任务: {self._current_task}")
         
         try:
@@ -395,6 +401,11 @@ class P115Service:
                     await asyncio.sleep(wait_time)
             
             # 4. Receive files
+            # 💡 增加预检：在大文件保存前尝试清理
+            await self.check_and_prepare_capacity(file_count=len(fids))
+            # 重新获取最新的 CID，以防清理逻辑删除了目录并重建了它
+            to_cid = await self._ensure_save_dir(target_dir)
+
             receive_payload = {
                 "share_code": payload["share_code"],
                 "receive_code": payload["receive_code"] or "",
@@ -409,10 +420,18 @@ class P115Service:
                 )
                 check_response(recv_resp)
                 logger.info(f"✅ 链接转存指令已发送: {share_url} -> CID {to_cid}")
+                recursive_links = []
             except Exception as recv_error:
+                # Check for 500-file limit error (errno 4200044)
+                error_info = getattr(recv_error, "args", [None, {}])[1] if hasattr(recv_error, "args") and len(recv_error.args) >= 2 else {}
+                errno_val = error_info.get("errno") if isinstance(error_info, dict) else None
+                
+                if errno_val == 4200044 or "超过当前等级限制" in str(recv_error):
+                    logger.warning(f"⚠️ 触发 115 非会员 500 文件保存限制，尝试递归分批保存: {share_url}")
+                    recursive_links = await self._save_share_recursive(share_url, to_cid)
+                    logger.info(f"✅ 递归分批保存指令已处理完毕: {share_url}")
                 # Check if it's a "file already received" error (errno 4200045)
-                error_msg = str(recv_error)
-                if "4200045" in error_msg or "已经接收" in error_msg:
+                elif "4200045" in str(recv_error) or "已经接收" in str(recv_error):
                     logger.warning(f"⚠️ 115 提示文件该分享已接收过: {share_url}")
                     # Verify if files really exist in to_cid
                     found_all = False
@@ -447,16 +466,177 @@ class P115Service:
                 "to_cid": to_cid, 
                 "names": names,
                 "share_url": share_url,
+                "recursive_links": recursive_links if 'recursive_links' in locals() else [],
                 "metadata": metadata or {}  # Include metadata in return value
             }
         except Exception as e:
-            error_msg = str(e)
-            logger.error(f"❌ 保存分享链接发生程序异常: {error_msg}", exc_info=True)
+            # 彻底避免 loguru 格式化异常时可能触发的 KeyError
+            try:
+                if hasattr(e, 'args') and len(e.args) >= 2 and isinstance(e.args[1], dict):
+                    error_msg = str(e.args[1].get('error', e))
+                else:
+                    error_msg = str(e)
+            except:
+                error_msg = "未知异常"
+            
+            logger.error("❌ 保存分享链接发生程序异常: {}", error_msg)
             return {
                 "status": "error",
                 "error_type": "exception",
                 "message": f"程序异常: {error_msg}"
             }
+
+    async def _save_share_recursive(self, share_url: str, target_pid: int) -> list[str]:
+        """递归分批保存分享内容 (规避 500 文件限制，集成中转清理逻辑)"""
+        payload = share_extract_payload(share_url)
+        share_code = payload["share_code"]
+        receive_code = payload["receive_code"] or ""
+        
+        # 状态追踪
+        cid_map = {0: target_pid}
+        share_links = []
+        files_saved_total = 0
+        
+        # 路径重建追踪：share_cid -> (parent_share_cid, name)
+        share_structure = {0: (None, "")}
+        
+        async def reconstruct_path(current_share_cid, current_cid_map):
+            """在清理后重建当前所在的文件夹路径"""
+            # 1. 确保保存目录存在
+            new_root_cid = await self._ensure_save_dir()
+            current_cid_map.clear()
+            current_cid_map[0] = new_root_cid
+            
+            # 2. 获取从根到当前的路径名列表
+            path_names = []
+            temp_cid = current_share_cid
+            while temp_cid != 0:
+                parent, name = share_structure[temp_cid]
+                path_names.append(name)
+                temp_cid = parent
+            path_names.reverse()
+            
+            # 3. 逐层创建
+            current_share = 0
+            current_real = new_root_cid
+            for name in path_names:
+                # 寻找对应的子 share_cid
+                child_share = next(s_cid for s_cid, info in share_structure.items() if info[0] == current_share and info[1] == name)
+                resp = await self._api_call_with_timeout(
+                    self.client.fs_makedirs_app, name, pid=current_real, async_=True
+                )
+                check_response(resp)
+                current_real = int(resp.get("cid") or resp.get("id") or (resp.get("data") or {}).get("cid") or 0)
+                current_cid_map[child_share] = current_real
+                current_share = child_share
+            
+            return current_real
+
+        async for pid, dirs, files in share_iterdir_walk(
+            self.client, share_code, receive_code, async_=True
+        ):
+            if pid not in cid_map:
+                # 如果因为中转清理丢失了映射，重建它
+                logger.info(f"🔄 正在递归深度中重建目录结构 (Share CID: {pid})...")
+                cid_map[pid] = await reconstruct_path(pid, cid_map)
+                
+            current_target_pid = cid_map[pid]
+            
+            # 1. 记录结构并创建子目录
+            for d in dirs:
+                share_cid = d["id"]
+                name = d["name"]
+                share_structure[share_cid] = (pid, name)
+                try:
+                    resp = await self._api_call_with_timeout(
+                        self.client.fs_makedirs_app, name, pid=current_target_pid, async_=True,
+                        label=f"fs_makedirs({name})"
+                    )
+                    check_response(resp)
+                    new_cid = int(resp.get("cid") or resp.get("id") or (resp.get("data") or {}).get("cid") or 0)
+                    if new_cid:
+                        cid_map[share_cid] = new_cid
+                except Exception as e:
+                    if "已经存在" in str(e) or "40004" in str(e):
+                        found = await self._find_files_in_dir(current_target_pid, [name])
+                        if found:
+                            cid_map[share_cid] = int(found[0]["fid"])
+                    else:
+                        logger.error(f"❌ 递归保存过程中创建子目录 {name} 失败: {e}")
+            
+            # 2. 分批转存该目录下的文件
+            fids = [str(f["id"]) for f in files]
+            if not fids:
+                continue
+                
+            for i in range(0, len(fids), 500):
+                # 🚦 检查是否需要中转清理
+                # 条件：已处理超过 10,000 文件，或者容量接近上限 (90%)
+                need_cleanup = files_saved_total >= 10000
+                if not need_cleanup and settings.P115_CLEANUP_CAPACITY_ENABLED:
+                    used, total = await self.get_storage_stats()
+                    if total > 0 and (used / total) > 0.9:
+                        need_cleanup = True
+                        logger.warning(f"⚠️ 容量逼近上限 ({used/total:.1%})，触发中转清理")
+
+                if need_cleanup:
+                    logger.info("📦 触发中转流程：正在生成当前已保存内容的分享链接...")
+                    # 这里的 CID 获取可能不准，因为我们是全量清理，所以直接分享保存目录根节点
+                    save_dir_cid = await self._ensure_save_dir()
+                    save_name = settings.P115_SAVE_DIR
+                    # 获取保存目录的父 CID 和 自己的名字，以便 create_share_link 能找到它
+                    # 由于 _ensure_save_dir 只给出了 CID，我们假设它就在根目录下或者我们可以通过其它方式分享
+                    # 简化逻辑：直接分享保存目录下的所有东西
+                    # 重新构造一个 save_result 来调用 create_share_link
+                    # 注意：我们要找的是保存目录里的东西
+                    try:
+                        # 列出保存目录下的顶级文件/文件夹名
+                        ls_resp = await self._api_call_with_timeout(self.client.fs_files, save_dir_cid, async_=True)
+                        ls_items = ls_resp.get("data", [])
+                        ls_names = [it["n"] for it in ls_items]
+                        
+                        if ls_names:
+                            intermediate_link = await self.create_share_link({"to_cid": save_dir_cid, "names": ls_names})
+                            if intermediate_link:
+                                logger.info(f"📤 中转链接已生成: {intermediate_link}")
+                                share_links.append(intermediate_link)
+                                # TODO: 这里如果能通过机器人发送即时消息更好
+                    except Exception as share_e:
+                        logger.error(f"❌ 中转分享生成失败: {share_e}")
+
+                    # 执行清理
+                    await self.cleanup_save_directory()
+                    await self.cleanup_recycle_bin()
+                    logger.info("🧹 中转清理完成，等待 5 秒恢复...")
+                    await asyncio.sleep(5)
+                    
+                    # 重置计数器并重建当前路径映射
+                    files_saved_total = 0
+                    current_target_pid = await reconstruct_path(pid, cid_map)
+                
+                batch = fids[i:i+500]
+                try:
+                    receive_payload = {
+                        "share_code": share_code,
+                        "receive_code": receive_code,
+                        "file_id": ",".join(batch),
+                        "cid": current_target_pid
+                    }
+                    recv_resp = await self._api_call_with_timeout(
+                        self.client.share_receive, receive_payload, async_=True,
+                        timeout=API_TIMEOUT, label=f"share_receive_batch({i//500})"
+                    )
+                    check_response(recv_resp)
+                    files_saved_total += len(batch)
+                    logger.info(f"✅ 递归分批转存成功: {len(batch)} 个文件 -> CID {current_target_pid} (本轮累计: {files_saved_total})")
+                    
+                    await asyncio.sleep(random.randint(2, 3))
+                except Exception as e:
+                    if "4200045" in str(e) or "已经接收" in str(e):
+                        continue
+                    logger.error(f"❌ 递归转存文件包失败: {e}")
+        
+        return share_links
 
     async def get_share_status(self, share_url: str):
         """Check the current status of a share link
@@ -686,98 +866,106 @@ class P115Service:
                 logger.warning(f"⚠️ 在保存目录 {to_cid} 中未找到对应的文件 {names}，可能 115 处理延迟或保存失败")
                 return None
             
-            # 7. Create new share with retry mechanism
-            share_code = None
-            receive_code = None
+            # 7. Create new share with retry mechanism and split if > 10,000 files
+            share_links = []
+            fids_str_list = [str(fid) for fid in new_fids]
             max_share_retries = 3
             
-            for retry_attempt in range(1, max_share_retries + 1):
-                try:
-                    logger.info(f"📤 正在创建分享链接 (尝试 {retry_attempt}/{max_share_retries}): {', '.join(names[:3])}...")
-                    send_resp = await self._api_call_with_timeout(
-                        self.client.share_send, ",".join(new_fids), async_=True,
-                        timeout=API_TIMEOUT, max_retries=1, label="share_send"
-                    )
-                    check_response(send_resp)
-                    
-                    # Extract share_code
-                    data = send_resp["data"]
-                    share_code = data.get("share_code")
-                    receive_code = data.get("receive_code") or data.get("recv_code")
-                    
-                    logger.info(f"✅ 分享链接创建成功: {share_code}")
-                    break  # Success, exit retry loop
-                    
-                except Exception as share_error:
-                    error_str = str(share_error)
-                    # Check if it's error 4100005 (file moved or deleted)
-                    if "4100005" in error_str or "已被移动或删除" in error_str:
-                        if retry_attempt < max_share_retries:
-                            logger.warning(f"⚠️ 文件尚未就绪 (错误 4100005)，等待 5 秒后重试...")
+            # Split fids into batches of 10,000 to respect 115 limits
+            for batch_idx, i in enumerate(range(0, len(fids_str_list), 10000), 1):
+                batch_fids = fids_str_list[i:i+10000]
+                batch_share_code = None
+                batch_receive_code = None
+                
+                for retry_attempt in range(1, max_share_retries + 1):
+                    try:
+                        logger.info(f"📤 正在创建分享链接 (分卷 {batch_idx}, 尝试 {retry_attempt}/{max_share_retries})...")
+                        send_resp = await self._api_call_with_timeout(
+                            self.client.share_send, ",".join(batch_fids), async_=True,
+                            timeout=API_TIMEOUT, max_retries=1, label=f"share_send_batch_{batch_idx}"
+                        )
+                        check_response(send_resp)
+                        
+                        data = send_resp["data"]
+                        batch_share_code = data.get("share_code")
+                        batch_receive_code = data.get("receive_code") or data.get("recv_code")
+                        
+                        logger.info(f"✅ 分享分卷 {batch_idx} 创建成功: {batch_share_code}")
+                        break
+                        
+                    except Exception as share_error:
+                        error_str = str(share_error)
+                        if ("4100005" in error_str or "已被移动或删除" in error_str) and retry_attempt < max_share_retries:
+                            logger.warning(f"⚠️ 文件尚未就绪，等待 5 秒后重试...")
                             await asyncio.sleep(5)
-                            continue
                         else:
-                            logger.error(f"❌ 重试 {max_share_retries} 次后仍失败: {share_error}")
-                            raise
-                    else:
-                        # Other errors, don't retry
-                        logger.error(f"❌ 创建分享链接失败 (非时序问题): {share_error}")
-                        raise
+                            logger.error(f"❌ 创建分享分卷 {batch_idx} 失败: {share_error}")
+                            if batch_idx == 1: raise # If even the first batch fails, raise
+                            break # Otherwise skip this batch
+                
+                if batch_share_code:
+                    # Update share to permanent
+                    try:
+                        logger.info(f"🔄 正在将分享链接 {batch_share_code} 转换为长期有效...")
+                        await self._api_call_with_timeout(
+                            self.client.share_update, {"share_code": batch_share_code, "share_duration": -1},
+                            async_=True, timeout=API_TIMEOUT, max_retries=2, label=f"share_update_{batch_idx}"
+                        )
+                    except Exception as e:
+                        logger.warning(f"⚠️ 转换长期分享失败 (分卷 {batch_idx}): {e}")
+                    
+                    full_link = f"https://115.com/s/{batch_share_code}"
+                    if batch_receive_code:
+                        full_link += f"?password={batch_receive_code}"
+                    share_links.append(full_link)
             
-            if not share_code:
-                logger.error("❌ 未能获取到 share_code")
+            if not share_links:
+                logger.error("❌ 未能生成任何分享链接")
                 return None
             
-            # 8. Update share to be permanent (share_duration=-1)
-            if share_code:
-                logger.info(f"🔄 正在将分享链接 {share_code} 转换为长期有效...")
-                update_payload = {
-                    "share_code": share_code,
-                    "share_duration": -1
-                }
-                update_resp = await self._api_call_with_timeout(
-                    self.client.share_update, update_payload, async_=True,
-                    timeout=API_TIMEOUT, max_retries=2, label="share_update"
-                )
-                check_response(update_resp)
-                logger.debug(f"Share update response: {update_resp}")
-
-            new_share = f"https://115.com/s/{share_code}"
-            if receive_code:
-                new_share += f"?password={receive_code}"
+            # Format multi-link response if split occurred
+            if len(share_links) > 1:
+                formatted_links = []
+                for idx, link in enumerate(share_links, 1):
+                    formatted_links.append(f"链接 {idx}: {link}")
+                result_share = "\n".join(formatted_links)
+                logger.info(f"🔗 已生成 {len(share_links)} 个分卷分享链接")
+            else:
+                result_share = share_links[0]
+                logger.info(f"🔗 长期分享链接已生成: {result_share}")
                 
-            logger.info(f"🔗 长期分享链接已生成: {new_share}")
-            return new_share
+            return result_share
             
         except Exception as e:
             logger.error(f"❌ 创建新分享链接失败: {e}")
             return None
 
-    async def cleanup_save_directory(self):
+    async def cleanup_save_directory(self, wait: bool = True):
         """Clean up the save directory by deleting the entire folder.
-        It will be automatically recreated by _ensure_save_dir on next save."""
-        async with self._acquire_task_lock("cleanup"):
-            logger.info(f"🧹 开始清理保存目录: {settings.P115_SAVE_DIR}")
-            try:
-                # 1. Get CID of save dir
+        It will be automatically recreated by _ensure_save_dir on next save.
+        """
+        try:
+            async with self._acquire_task_lock("cleanup", wait=wait):
+                logger.info(f"🧹 开始清理保存目录: {settings.P115_SAVE_DIR}")
+                # ... rest of logic remains but we use _ensure_save_dir logic ...
                 cid = await self._ensure_save_dir()
                 if not cid:
-                    return
+                    return False
                 
-                # 2. Delete the directory
                 resp = await self._api_call_with_timeout(
                     self.client.fs_delete, cid, async_=True,
                     timeout=API_TIMEOUT, label="fs_delete"
                 )
                 check_response(resp)
                 
-                # 3. Clear cache
                 self.clear_save_dir_cache()
-                logger.info(f"✅ 保存目录清理完成")
+                logger.info("✅ 保存目录清理完成")
                 return True
-            except Exception as e:
-                logger.error(f"❌ 清理目录失败: {e}")
-                return False
+        except BlockingIOError:
+            return False
+        except Exception as e:
+            logger.error(f"❌ 清理保存目录失败: {e}")
+            return False
 
     async def get_storage_stats(self) -> Tuple[int, int]:
         """Get storage stats (used, total) of 115 Drive in bytes"""
@@ -789,67 +977,161 @@ class P115Service:
                 timeout=API_TIMEOUT, label="user_space_info"
             )
             check_response(resp)
-            # Response: {'state': True, ... 'data': {'all_total': ..., 'all_used': ...}}
-            # Values can be direct numbers or dicts like {'size': ..., 'size_format': ...}
             data = resp.get("data", {})
             
             def extract_size(val) -> int:
                 if isinstance(val, dict):
-                    return int(val.get("size") or val.get("size_total") or 0)
+                    # Handle cases like {'size': '...', 'size_format': '...'} or {'size_total': ...}
+                    return int(val.get("size") or val.get("size_total") or val.get("size_use") or 0)
                 try:
                     return int(val) if val is not None else 0
                 except (ValueError, TypeError):
                     return 0
 
-            # Try common keys for used space
-            used_val = data.get("all_used") or data.get("all_use")
-            used = extract_size(used_val)
-            
-            # Try common keys for total space
-            total_val = data.get("all_total")
-            total = extract_size(total_val)
+            # Try common keys for used and total space
+            used = extract_size(data.get("all_used") or data.get("all_use") or data.get("used") or 0)
+            total = extract_size(data.get("all_total") or data.get("total") or 0)
             
             return used, total
         except Exception as e:
-            logger.error(f"❌ 获取网盘容量失败: {e}")
+            logger.error("❌ 获取网盘容量失败: {}", str(e))
             return 0, 0
 
-    async def check_capacity_and_cleanup(self):
-        """Check current capacity and trigger cleanup if it exceeds limit"""
+    async def check_and_prepare_capacity(self, file_count: int = 0):
+        """Check capacity and optionally clean up before starting a task.
+        Trigger cleanup if:
+        1. file_count > 500 (Batch mode)
+        2. Space is tighter than configured threshold
+        """
         if not settings.P115_CLEANUP_CAPACITY_ENABLED:
             return
-            
-        limit = settings.P115_CLEANUP_CAPACITY_LIMIT
-        
-        if limit < 1:
+
+        # 1. Check if we should clean up based on file count (predictive)
+        if file_count > 500:
+            logger.info(f"🚀 检测到批量保存任务 (文件数: {file_count})，执行预防性清理...")
+            await self.cleanup_save_directory()
+            await self.cleanup_recycle_bin()
+            await asyncio.sleep(3) # Wait for 115 to sync
             return
-            
-        # Convert limit (TB) to bytes
-        limit_bytes = limit * (1024**4)
-        
+
+        # 2. Check current capacity
+        limit = settings.P115_CLEANUP_CAPACITY_LIMIT
+        if limit <= 0:
+            return
+
         used_bytes, total_bytes = await self.get_storage_stats()
         if total_bytes == 0:
             return
-            
-        used_tb = used_bytes / (1024**4)
-        total_tb = total_bytes / (1024**4)
+
+        limit_bytes = limit * (1024**4) if settings.P115_CLEANUP_CAPACITY_UNIT == "TB" else limit * (1024**3)
         
         if used_bytes > limit_bytes:
-            logger.warning(f"⚠️ 网盘容量({used_tb:.2f} TB / {total_tb:.2f} TB)超过设定阈值({limit:.2f} TB)，触发自动清理")
+            used_val = used_bytes / (1024**4) if settings.P115_CLEANUP_CAPACITY_UNIT == "TB" else used_bytes / (1024**3)
+            logger.warning(f"⚠️ 网盘容量({used_val:.2f} {settings.P115_CLEANUP_CAPACITY_UNIT})超过设定阈值，执行清理...")
             await self.cleanup_save_directory()
             await self.cleanup_recycle_bin()
-            
-            # Re-check capacity after cleanup (wait a bit for 115 API to update)
-            await asyncio.sleep(2)
-            new_used_bytes, new_total_bytes = await self.get_storage_stats()
-            new_used_tb = new_used_bytes / (1024**4)
-            logger.info(f"✨ 清理完成。当前网盘状态: 已用 {new_used_tb:.2f} TB / 总计 {total_tb:.2f} TB (清理前: {used_tb:.2f} TB)")
-        else:
-            logger.info(f"📊 网盘状态: 已用 {used_tb:.2f} TB / 总计 {total_tb:.2f} TB (清理阈值: {limit:.2f} TB)")
+            await asyncio.sleep(3)
 
-    async def get_history_link(self, original_url: str) -> str | None:
-        """Check if a link has been processed before"""
+    async def check_capacity_and_cleanup(self, mode: str = "manual"):
+        """Check current capacity and trigger cleanup if it exceeds limit.
+        
+        Args:
+            mode: "manual", "scheduled", or "batch"
+        """
+        # Determine if we should wait for the lock
+        wait_for_lock = True
+        if mode == "scheduled":
+            wait_for_lock = False # Skip if busy
+            # 提前检查锁，以便在转存运行时给出明确的“跳过”日志，即便空间充足也告知用户
+            try:
+                async with self._acquire_task_lock("capacity_check_probe", wait=False):
+                    pass
+            except BlockingIOError:
+                logger.info("⏭️ 定时容量检查：检测到转存任务运行中，按计划跳过锁定监测")
+                return False
+        
+        logger.debug(f"🔍 [容量检查] 模式: {mode}, 正在获取存储状态...")
+            
+        # 1. Determine the threshold
+        # If batch mode and auto-cleanup is disabled, use 10% fallback
+        use_fallback = (mode == "batch" and not settings.P115_CLEANUP_CAPACITY_ENABLED)
+        
+        limit = settings.P115_CLEANUP_CAPACITY_LIMIT
+        unit = settings.P115_CLEANUP_CAPACITY_UNIT
+        
+        used_bytes, total_bytes = await self.get_storage_stats()
+        if total_bytes <= 0:
+            return False
+
+        should_cleanup = False
+        
+        if use_fallback:
+            # check for 10% remaining
+            if (total_bytes - used_bytes) < (total_bytes * 0.1):
+                logger.warning(f"🚨 [批量任务] 剩余空间不足 10% ({(total_bytes-used_bytes)/(1024**4):.2f}TB)，触发硬性清理")
+                should_cleanup = True
+        elif settings.P115_CLEANUP_CAPACITY_ENABLED and limit > 0:
+            limit_bytes = limit * (1024**4) if unit == "TB" else limit * (1024**3)
+            if used_bytes > limit_bytes:
+                logger.info(f"📊 [{mode}] 网盘已用空间 ({used_bytes/(1024**4):.2f}TB) 超过阈值 ({limit} {unit})")
+                should_cleanup = True
+        
+        if should_cleanup or mode == "manual":
+            # Execute cleanup with non-blocking support for scheduled tasks
+            try:
+                # We don't acquire the lock here directly, but pass wait down to atomic cleanup methods
+                # which DO acquire the lock. 
+                # Actually, check_capacity_and_cleanup held lock in original version.
+                # Let's wrap the actual cleanup calls in the lock.
+                async with self._acquire_task_lock("cleanup", wait=wait_for_lock):
+                    logger.info(f"🧹 执行容量管理清理 (模式: {mode})...")
+                    # Note: we call internal versions or handle logic here to avoid re-acquiring lock
+                    # But cleanup_save_directory has its own lock. So we need a way to bypass it or透传.
+                    # Best is to have an internal _cleanup method.
+                    await self._do_cleanup_logic()
+                    return True
+            except BlockingIOError:
+                if mode == "scheduled":
+                    # 理论上这里由于之前的 probe 不会轻易触发，但作为安全兜底保留
+                    logger.info("⏭️ 定时容量检查：转存锁获取冲突，按计划跳过任务")
+                return False
+        else:
+            if mode != "batch": # Batch mode logs are redundant if we log in worker
+                logger.debug(f"✅ [容量检查] 当前空间充足 ({used_bytes/(1024**4):.2f}TB)，无需清理")
+        return False
+
+    async def _do_cleanup_logic(self):
+        """Internal worker for cleanup without lock management"""
+        # 1. Cleanup directory
+        cid = await self._ensure_save_dir()
+        if cid:
+            try:
+                resp = await self._api_call_with_timeout(
+                    self.client.fs_delete, cid, async_=True,
+                    timeout=API_TIMEOUT, label="fs_delete"
+                )
+                check_response(resp)
+                self.clear_save_dir_cache()
+            except Exception as e:
+                logger.error(f"清理保存目录失败: {e}")
+        
+        # 2. Cleanup recycle bin
+        payload = {}
+        if settings.P115_RECYCLE_PASSWORD:
+            payload["password"] = settings.P115_RECYCLE_PASSWORD
         try:
+            resp = await self._api_call_with_timeout(
+                self.client.recyclebin_clean_app, payload, async_=True,
+                timeout=API_TIMEOUT, label="recyclebin_clean"
+            )
+            check_response(resp)
+        except Exception as e:
+            logger.error(f"清空回收站失败: {e}")
+
+    async def get_history_link(self, original_url: str) -> Optional[Union[str, list[str]]]:
+        """Check if a link has been processed before. Returns string or list of strings."""
+        try:
+            import json
             from app.models.schema import LinkHistory
             async with async_session() as session:
                 result = await session.execute(
@@ -857,28 +1139,45 @@ class P115Service:
                 )
                 record = result.scalar_one_or_none()
                 if record:
-                    return record.share_link
+                    link_val = record.share_link
+                    if link_val.startswith("[") and link_val.endswith("]"):
+                        try:
+                            return json.loads(link_val)
+                        except:
+                            return link_val
+                    return link_val
             return None
         except Exception as e:
             logger.error(f"查询历史记录失败: {e}")
             return None
 
-    async def save_history_link(self, original_url: str, share_link: str):
-        """Save a processed link to history"""
+    async def save_history_link(self, original_url: str, share_link: Union[str, list[str]]):
+        """Save processed link(s) to history. share_link can be a list."""
         try:
+            import json
             from app.models.schema import LinkHistory
+            
+            # Convert list to JSON string
+            if isinstance(share_link, list):
+                if not share_link:
+                    return
+                # If only one link, store as string, otherwise JSON
+                link_to_store = json.dumps(share_link) if len(share_link) > 1 else share_link[0]
+            else:
+                link_to_store = share_link
+
             async with async_session() as session:
-                # Check existance first to avoid unique constraint error
                 existing = await session.execute(
                     select(LinkHistory).where(LinkHistory.original_url == original_url)
                 )
-                if existing.scalar_one_or_none():
-                    return
-                
-                new_record = LinkHistory(original_url=original_url, share_link=share_link)
-                session.add(new_record)
+                record = existing.scalar_one_or_none()
+                if record:
+                    record.share_link = link_to_store
+                else:
+                    new_record = LinkHistory(original_url=original_url, share_link=link_to_store)
+                    session.add(new_record)
                 await session.commit()
-                logger.info(f"已保存历史记录: {original_url} -> {share_link}")
+                logger.info(f"已保存历史记录: {original_url} -> {link_to_store[:50]}...")
         except Exception as e:
             logger.error(f"保存历史记录失败: {e}")
 
@@ -896,28 +1195,27 @@ class P115Service:
             logger.error(f"清空历史记录失败: {e}")
             return False
 
-    async def cleanup_recycle_bin(self):
+    async def cleanup_recycle_bin(self, wait: bool = True):
         """Empty the recycle bin"""
-        async with self._acquire_task_lock("cleanup"):
-            logger.info("🗑️ 开始清空回收站...")
-            try:
-                # Prepare payload with optional password
+        try:
+            async with self._acquire_task_lock("cleanup", wait=wait):
+                logger.info("🗑️ 开始清空回收站...")
                 payload = {}
                 if settings.P115_RECYCLE_PASSWORD:
                     payload["password"] = settings.P115_RECYCLE_PASSWORD
                     logger.debug("使用回收站密码")
                 
-                # Call recycle bin cleanup API
                 resp = await self._api_call_with_timeout(
                     self.client.recyclebin_clean_app, payload, async_=True,
                     timeout=API_TIMEOUT, label="recyclebin_clean"
                 )
                 check_response(resp)
-                
                 logger.info("✅ 回收站已清空")
                 return True
-            except Exception as e:
-                logger.error("❌ 清空回收站失败: {}", e)
-                return False
+        except BlockingIOError:
+            return False
+        except Exception as e:
+            logger.error("❌ 清空回收站失败: {}", e)
+            return False
 
 p115_service = P115Service()

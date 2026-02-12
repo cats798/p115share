@@ -229,6 +229,13 @@ class TGService:
                         if share_link:
                             await p115_service.save_history_link(share_url, share_link)
                             processed_links[share_url] = share_link
+                            
+                            # 处理递归保存中间产生的链接
+                            recursive_links = save_res.get("recursive_links", [])
+                            if recursive_links:
+                                links_text = "\n".join([f"分卷 {idx}: {link}" for idx, link in enumerate(recursive_links, 1)])
+                                await message.reply(f"📦 递归保存中产生的中间链接：\n{links_text}")
+
                             # Send detailed success messages to sender
                             await message.reply(f"✅ 处理成功！\n长期分享链接：\n{share_link}")
                             await message.reply(f"🔔 链接保存成功！\n原链接: {share_url}\n新分享: {share_link}")
@@ -571,7 +578,12 @@ class TGService:
         try:
             if is_concise:
                 for original_url, share_link in share_links_map.items():
-                    await self.bot.send_message(channel_id, f"✅ 处理成功！\n链接：{share_link}")
+                    if isinstance(share_link, list) and len(share_link) > 1:
+                        links_text = "\n".join([f"分卷 {i+1}：{lnk}" for i, lnk in enumerate(share_link)])
+                        await self.bot.send_message(channel_id, f"✅ 处理成功！\n{links_text}")
+                    else:
+                        actual_link = share_link[0] if isinstance(share_link, list) and share_link else share_link
+                        await self.bot.send_message(channel_id, f"✅ 处理成功！\n链接：{actual_link}")
                 return
 
             # Batch replacement logic
@@ -579,8 +591,20 @@ class TGService:
             new_entities = entities
             
             # 1. Replace all URLs (in text and entities)
-            for old_url, new_url in share_links_map.items():
+            for old_url, new_url_val in share_links_map.items():
                 if not old_url: continue
+                
+                # Format list to multi-part links if needed
+                if isinstance(new_url_val, list):
+                    if len(new_url_val) > 1:
+                        new_url = "\n" + "\n".join([f"分卷 {i+1}：{lnk}" for i, lnk in enumerate(new_url_val)])
+                    elif new_url_val:
+                        new_url = new_url_val[0]
+                    else:
+                        new_url = ""
+                else:
+                    new_url = new_url_val
+
                 new_text, new_entities = self._replace_text_and_adjust_entities(
                     new_text, new_entities, old_url, new_url
                 )
@@ -633,7 +657,16 @@ class TGService:
         sorted_originals = sorted(share_links_map.keys(), key=lambda url: text.find(url) if url in text else 999999)
 
         for old_url in sorted_originals:
-            share_link = share_links_map[old_url]
+            share_link_val = share_links_map[old_url]
+            # If it's a list (multi-part share), use the first link to parse the password
+            # Since all parts usually share the same password setting
+            if isinstance(share_link_val, list):
+                if not share_link_val:
+                    continue
+                share_link = share_link_val[0]
+            else:
+                share_link = share_link_val
+
             parsed = urlparse(share_link)
             params = parse_qs(parsed.query)
             new_pwd = params.get("password", [""])[0]

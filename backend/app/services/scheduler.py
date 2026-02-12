@@ -29,6 +29,7 @@ class CleanupScheduler:
                     CronTrigger.from_crontab(settings.P115_CLEANUP_DIR_CRON),
                     id=job_id,
                     name="清理保存目录",
+                    args=[False], # wait=False
                     replace_existing=True
                 )
                 logger.info(f"✅ 已设置清理保存目录定时任务: {settings.P115_CLEANUP_DIR_CRON}")
@@ -49,6 +50,7 @@ class CleanupScheduler:
                     CronTrigger.from_crontab(settings.P115_CLEANUP_TRASH_CRON),
                     id=job_id,
                     name="清空回收站",
+                    args=[False], # wait=False
                     replace_existing=True
                 )
                 logger.info(f"✅ 已设置清空回收站定时任务: {settings.P115_CLEANUP_TRASH_CRON}")
@@ -69,6 +71,7 @@ class CleanupScheduler:
                     p115_service.check_capacity_and_cleanup,
                     'interval',
                     minutes=30,
+                    kwargs={"mode": "scheduled"},
                     id=job_id,
                     name="自动检测网盘容量",
                     replace_existing=True

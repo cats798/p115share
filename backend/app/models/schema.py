@@ -35,7 +35,7 @@ class LinkHistory(Base):
     
     id: Mapped[int] = mapped_column(primary_key=True)
     original_url: Mapped[str] = mapped_column(String(255), unique=True, index=True)
-    share_link: Mapped[str] = mapped_column(String(255))
+    share_link: Mapped[str] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 class ExcelTask(Base):
@@ -65,7 +65,7 @@ class ExcelTaskItem(Base):
     title: Mapped[str] = mapped_column(String(255), nullable=True)
     extraction_code: Mapped[str] = mapped_column(String(50), nullable=True)
     status: Mapped[str] = mapped_column(String(20), default="待处理")  # 待处理, 处理中, 成功, 失败, 跳过
-    new_share_url: Mapped[str] = mapped_column(String(255), nullable=True)
+    new_share_url: Mapped[str] = mapped_column(Text, nullable=True)
     error_msg: Mapped[str] = mapped_column(Text, nullable=True)
     item_metadata: Mapped[dict] = mapped_column(JSON, nullable=True)  # Store original message text and entities
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)

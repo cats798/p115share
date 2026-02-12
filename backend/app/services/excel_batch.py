@@ -234,6 +234,7 @@ class ExcelBatchService:
     async def _worker(self):
         while True:
             try:
+                item_id = None
                 # Check for tasks that are "running"
                 async with async_session() as session:
                     result = await session.execute(
@@ -300,6 +301,13 @@ class ExcelBatchService:
 
                         # Process the item
                         await self._process_item(item_id)
+                        
+                        # 🚦 每次成功处理后，检查网盘容量
+                        try:
+                            await p115_service.check_capacity_and_cleanup(mode="batch")
+                            logger.debug(f"ℹ️ [{item_id}] 批量任务后置容量检查已完成")
+                        except Exception as ce:
+                            logger.error(f"批量任务后置容量检查失败: {ce}")
                     finally:
                         # Find next row and set is_waiting to True before sleep
                         if item_id:
@@ -357,15 +365,15 @@ class ExcelBatchService:
             history_url = await p115_service.get_history_link(original_url)
             if history_url:
                 item.status = "成功"
-                item.new_share_url = history_url
+                import json
+                item.new_share_url = json.dumps(history_url) if isinstance(history_url, list) else history_url
                 await session.commit()
                 await self._update_task_counts(task_id)
                 if tg_service:
                     if item.item_metadata:
                         await tg_service.broadcast_to_channels({original_url: history_url}, item.item_metadata)
                     else:
-                        msg_content = f"资源名称：{item.title or '未知'}\n分享链接：{history_url}"
-                        await tg_service.broadcast_to_channels({original_url: history_url}, {"full_text": msg_content})
+                        await tg_service.broadcast_to_channels({original_url: history_url}, {"full_text": f"资源名称：{item.title or '未知'}\n分享链接：{{{{share_link}}}}"})
                 return
 
             try:
@@ -394,20 +402,26 @@ class ExcelBatchService:
                 if save_res:
                     if save_res.get("status") == "success":
                         share_link = save_res.get("share_link")
-                        if share_link:
-                            await p115_service.save_history_link(original_url, share_link)
-                            item.new_share_url = share_link
+                        recursive_links = save_res.get("recursive_links", [])
+                        
+                        # 合并主链接和分卷链接
+                        all_links = recursive_links + ([share_link] if share_link else [])
+                        
+                        if all_links:
+                            import json
+                            # 如果只有一个链接存字符串，多个存 JSON
+                            link_to_store = json.dumps(all_links) if len(all_links) > 1 else all_links[0]
+                            
+                            await p115_service.save_history_link(original_url, all_links)
+                            item.new_share_url = link_to_store
                             item.status = "成功"
                             
                             # Broadcast to channels
                             if tg_service:
                                 if item.item_metadata:
-                                    # Use the stored format
-                                    await tg_service.broadcast_to_channels({original_url: share_link}, metadata)
+                                    await tg_service.broadcast_to_channels({original_url: all_links}, metadata)
                                 else:
-                                    # Use default simple format
-                                    msg_content = f"云盘分享\n资源名称：{item.title or '未知'}\n分享链接：{share_link}"
-                                    await tg_service.broadcast_to_channels({original_url: share_link}, {"full_text": msg_content})
+                                    await tg_service.broadcast_to_channels({original_url: all_links}, {"full_text": f"资源名称：{item.title or '未知'}\n分享链接：{{{{share_link}}}}"})
                         else:
                             item.status = "失败"
                             item.error_msg = "转存成功但生成分享链接返回为空"
