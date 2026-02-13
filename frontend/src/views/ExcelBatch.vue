@@ -194,9 +194,9 @@
                   <div class="form-item">
                      <label>转存间隔 (秒)</label>
                      <div class="interval-input">
-                        <a-input-number v-model:value="intervalMin" :min="1" :precision="0" style="width: 80px" />
+                        <a-input-number v-model:value="intervalMin" :min="1" :precision="0" style="width: 80px" :disabled="['running', 'pausing', 'cancelling'].includes(currentTask?.status)" />
                         <span style="margin: 0 8px">-</span>
-                        <a-input-number v-model:value="intervalMax" :min="1" :precision="0" style="width: 80px" />
+                        <a-input-number v-model:value="intervalMax" :min="1" :precision="0" style="width: 80px" :disabled="['running', 'pausing', 'cancelling'].includes(currentTask?.status)" />
                         <span style="margin-left: 8px">随机休眠</span>
                      </div>
                   </div>
@@ -207,10 +207,41 @@
                         :min="0" 
                         :precision="0" 
                          style="width: 100px"
-                         :disabled="['running', 'paused', 'pausing', 'cancelling'].includes(currentTask?.status)"
+                         :disabled="['running', 'pausing', 'cancelling'].includes(currentTask?.status)"
                       />
                   </div>
                 </div>
+                
+                <div class="form-row">
+                  <div class="form-item" style="flex: 1">
+                    <label>白名单关键词 (包含任一则执行)</label>
+                    <a-input v-model:value="whiteListKeywords" placeholder="关键词1, 关键词2 (逗号分隔)" :disabled="['running', 'pausing', 'cancelling'].includes(currentTask?.status)" />
+                  </div>
+                  <div class="form-item" style="flex: 1; margin-left: 24px">
+                    <label>黑名单关键词 (包含任一则跳过)</label>
+                    <a-input v-model:value="blackListKeywords" placeholder="关键词1, 关键词2 (逗号分隔)" :disabled="['running', 'pausing', 'cancelling'].includes(currentTask?.status)" />
+                  </div>
+                </div>
+
+                <div class="form-row" v-if="tgChannels.length > 0">
+                   <div class="form-item" style="width: 100%">
+                      <label>推送频道</label>
+                      <a-select 
+                         v-model:value="selectedChannels" 
+                         mode="multiple" 
+                         style="width: 100%" 
+                         placeholder="选择推送频道 (留空则不推送)"
+                         :disabled="['running', 'pausing', 'cancelling'].includes(currentTask?.status)"
+                         allow-clear
+                         option-label-prop="label"
+                      >
+                         <a-select-option v-for="c in tgChannels" :key="c.id" :value="c.id" :label="c.name || c.id">
+                           {{ c.name ? `${c.name} (${c.id})` : c.id }}
+                         </a-select-option>
+                      </a-select>
+                   </div>
+                </div>
+
                <div class="form-actions">
                   <a-space>
                     <a-button 
@@ -424,6 +455,10 @@ const searchQuery = ref('');
 const intervalMin = ref(5);
 const intervalMax = ref(10);
 const systemSaveDir = ref('/分享保存');
+const tgChannels = ref<any[]>([]);
+const selectedChannels = ref<string[]>([]);
+const whiteListKeywords = ref('');
+const blackListKeywords = ref('');
 
 // Upload & Mapping
 const mappingModalVisible = ref(false);
@@ -472,6 +507,30 @@ const fetchSettings = async () => {
     if (res.data.p115_save_dir) {
       systemSaveDir.value = res.data.p115_save_dir;
     }
+    
+    // Parse target channels
+    if (res.data.tg_channels) {
+      try {
+        const channels = JSON.parse(res.data.tg_channels);
+        tgChannels.value = channels.filter((c: any) => c.enabled);
+        
+        // Also add legacy channel ID if enabled and not in list
+        const legacyId = res.data.tg_channel_id;
+        if (legacyId && !tgChannels.value.find((c: any) => c.id === legacyId)) {
+           tgChannels.value.unshift({ id: legacyId, enabled: true, name: '默认频道', concise: false });
+        }
+        
+        // Default select all
+        selectedChannels.value = tgChannels.value.map((c: any) => c.id);
+      } catch (e) {
+        console.error("Failed to parse tg_channels", e);
+        tgChannels.value = [];
+      }
+    } else if (res.data.tg_channel_id) {
+       // Only legacy
+       tgChannels.value = [{ id: res.data.tg_channel_id, enabled: true, name: '默认频道', concise: false }];
+       selectedChannels.value = [res.data.tg_channel_id];
+    }
   } catch (e) {
     console.error('获取设置失败', e);
   }
@@ -487,6 +546,15 @@ const fetchCurrentTask = async () => {
       if (index !== -1) {
         tasks.value[index] = updatedTask;
       }
+      
+      // Update local state if task has saved channels
+      if (updatedTask.target_channels) {
+         // If task has specific channels saved, use them
+         // Note: The backend might return them as a list directly
+         selectedChannels.value = updatedTask.target_channels;
+      }
+      if (updatedTask.white_list_keywords !== undefined) whiteListKeywords.value = updatedTask.white_list_keywords || '';
+      if (updatedTask.black_list_keywords !== undefined) blackListKeywords.value = updatedTask.black_list_keywords || '';
     }
   } catch (e) {
     console.error('获取任务详情失败', e);
@@ -520,6 +588,17 @@ const selectTask = (id: number) => {
   currentTaskId.value = id;
   const task = tasks.value.find(t => t.id === id);
   skipCount.value = task?.skip_count || 0;
+  
+  if (task?.target_channels) {
+      selectedChannels.value = task.target_channels;
+  } else if (tasks.value.length > 0 && selectedChannels.value.length === 0) {
+      // If no saved channels, default to all available (initially loaded)
+      selectedChannels.value = tgChannels.value.map(c => c.id);
+  }
+
+  whiteListKeywords.value = task?.white_list_keywords || '';
+  blackListKeywords.value = task?.black_list_keywords || '';
+  
   pagination.current = 1;
   pagination.pageSize = 50;
   fetchTaskItems();
@@ -590,7 +669,10 @@ const handleStartTask = async () => {
     await axios.post(`/api/excel/tasks/${currentTaskId.value}/start`, {
       skip_count: skipCount.value,
       interval_min: intervalMin.value,
-      interval_max: intervalMax.value
+      interval_max: intervalMax.value,
+      target_channels: selectedChannels.value,
+      white_list_keywords: whiteListKeywords.value,
+      black_list_keywords: blackListKeywords.value
     });
     message.success(isResume ? '正在继续转存分享...' : '正在启动转存分享...');
     await fetchTasks();

@@ -14,6 +14,9 @@ class StartTaskRequest(BaseModel):
     skip_count: Optional[int] = 0
     interval_min: Optional[int] = 5
     interval_max: Optional[int] = 10
+    target_channels: Optional[List[str]] = None
+    white_list_keywords: Optional[str] = None
+    black_list_keywords: Optional[str] = None
 
 @router.post("/parse")
 async def parse_excel(
@@ -93,7 +96,15 @@ async def get_task_items(
 
 @router.post("/tasks/{task_id}/start")
 async def start_task(task_id: int, req: StartTaskRequest, current_user: dict = Depends(get_current_user)):
-    await excel_batch_service.start_task(task_id, req.skip_count, req.interval_min, req.interval_max)
+    await excel_batch_service.start_task(
+        task_id, 
+        req.skip_count, 
+        req.interval_min, 
+        req.interval_max, 
+        req.target_channels,
+        req.white_list_keywords,
+        req.black_list_keywords
+    )
     return {"status": "success"}
 
 @router.post("/tasks/{task_id}/pause")

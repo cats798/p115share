@@ -763,8 +763,21 @@ class TGService:
                 ))
         return new_text, new_entities
 
-    async def broadcast_to_channels(self, share_links_map: dict, metadata: dict):
-        """Broadcast processed link(s) to all configured and enabled channels"""
+    async def get_chat_info(self, chat_id: str):
+        """Fetch chat info (title, type) from Telegram"""
+        if not self.bot:
+            return None
+        try:
+            chat = await self.bot.get_chat(chat_id)
+            return {"id": str(chat.id), "title": chat.title, "type": chat.type}
+        except Exception as e:
+            logger.error(f"Failed to get chat info for {chat_id}: {e}")
+            return None
+
+    async def broadcast_to_channels(self, share_links_map: dict, metadata: dict, channel_ids: list = None):
+        """Broadcast processed link(s) to all configured and enabled channels
+        :param channel_ids: Optional list of channel IDs to filter the broadcast. If None, send to all enabled.
+        """
         import json
         channels = []
         try:
@@ -778,8 +791,13 @@ class TGService:
             
         enabled_channels = [c for c in channels if c.get("enabled")]
         
+        # Filter by specific channel_ids if requested (e.g. for batch tasks)
+        if channel_ids is not None:
+            target_ids = set(str(cid) for cid in channel_ids)
+            enabled_channels = [c for c in enabled_channels if str(c.get("id")) in target_ids]
+        
         if not enabled_channels:
-            logger.debug("没有已配置或已启用的频道，跳过广播")
+            logger.debug(f"没有符合条件的目标频道 (channel_ids={channel_ids})，跳过广播")
             return
             
         for chan in enabled_channels:

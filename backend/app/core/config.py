@@ -78,7 +78,7 @@ class Settings(BaseSettings):
                             sql += " DEFAULT ''"
                     
                     conn.execute(text(sql))
-                    logger.info(f"📦 数据库迁移: 为表 {table_name} 添加列 {column.name}")
+                    logger.info(f"[DB] 数据库迁移: 为表 {table_name} 添加列 {column.name}")
 
     async def init_db(self):
         """Initialize database tables and ensure schema is up-to-date"""

@@ -360,9 +360,66 @@ class ExcelBatchService:
 
     async def _process_item(self, item_id: int):
         async with async_session() as session:
-            result = await session.execute(select(ExcelTaskItem).where(ExcelTaskItem.id == item_id))
-            item = result.scalar_one()
+            # Query Item and Task together to get target_channels and keywords
+            result = await session.execute(
+                select(
+                    ExcelTaskItem, 
+                    ExcelTask.target_channels,
+                    ExcelTask.white_list_keywords,
+                    ExcelTask.black_list_keywords
+                )
+                .join(ExcelTask, ExcelTask.id == ExcelTaskItem.task_id)
+                .where(ExcelTaskItem.id == item_id)
+            )
+            try:
+                row = result.one()
+                item = row[0]
+                target_channels = row[1]
+                white_list = row[2]
+                black_list = row[3]
+            except Exception:
+                logger.error(f"Item {item_id} not found or task deleted")
+                return
+
             task_id = item.task_id
+            
+            # --- Keyword Filtering Logic ---
+            search_text = f"{item.title or ''} {item.original_url or ''}"
+            if item.item_metadata and isinstance(item.item_metadata, dict):
+                search_text += f" {item.item_metadata.get('full_text', '')}"
+            
+            search_text = search_text.lower()
+            
+            # 1. Check Blacklist (Blacklist Wins)
+            if black_list:
+                black_keywords = [k.strip().lower() for k in black_list.split(',') if k.strip()]
+                for kw in black_keywords:
+                    if kw in search_text:
+                        logger.info(f"Item {item.id} skipped (Blacklist match: {kw})")
+                        item.status = "跳过"
+                        item.error_msg = f"命中黑名单关键词: {kw}"
+                        await session.commit()
+                        await self._update_task_counts(task_id)
+                        return
+            
+            # 2. Check Whitelist
+            if white_list:
+                white_keywords = [k.strip().lower() for k in white_list.split(',') if k.strip()]
+                if white_keywords:
+                    found_white = False
+                    for kw in white_keywords:
+                        if kw in search_text:
+                            found_white = True
+                            break
+                    
+                    if not found_white:
+                        logger.info(f"Item {item.id} skipped (Whitelist no match)")
+                        item.status = "跳过"
+                        item.error_msg = "未命中白名单关键词"
+                        await session.commit()
+                        await self._update_task_counts(task_id)
+                        return
+            # --- End Filtering Logic ---
             
             original_url = item.original_url
             if not original_url:
@@ -382,9 +439,9 @@ class ExcelBatchService:
                 await self._update_task_counts(task_id)
                 if tg_service:
                     if item.item_metadata:
-                        await tg_service.broadcast_to_channels({original_url: history_url}, item.item_metadata)
+                        await tg_service.broadcast_to_channels({original_url: history_url}, item.item_metadata, channel_ids=target_channels)
                     else:
-                        await tg_service.broadcast_to_channels({original_url: history_url}, {"full_text": f"资源名称：{item.title or '未知'}\n分享链接：{{{{share_link}}}}"})
+                        await tg_service.broadcast_to_channels({original_url: history_url}, {"full_text": f"资源名称：{item.title or '未知'}\n分享链接：{{{{share_link}}}}"}, channel_ids=target_channels)
                 return
 
             try:
@@ -430,9 +487,9 @@ class ExcelBatchService:
                             # Broadcast to channels
                             if tg_service:
                                 if item.item_metadata:
-                                    await tg_service.broadcast_to_channels({original_url: all_links}, metadata)
+                                    await tg_service.broadcast_to_channels({original_url: all_links}, metadata, channel_ids=target_channels)
                                 else:
-                                    await tg_service.broadcast_to_channels({original_url: all_links}, {"full_text": f"资源名称：{item.title or '未知'}\n分享链接：{{{{share_link}}}}"})
+                                    await tg_service.broadcast_to_channels({original_url: all_links}, {"full_text": f"资源名称：{item.title or '未知'}\n分享链接：{{{{share_link}}}}"}, channel_ids=target_channels)
                         else:
                             item.status = "失败"
                             item.error_msg = "转存成功但生成分享链接返回为空"
@@ -478,7 +535,7 @@ class ExcelBatchService:
             )
             await session.commit()
 
-    async def start_task(self, task_id: int, skip_count: int = 0, interval_min: int = 5, interval_max: int = 10):
+    async def start_task(self, task_id: int, skip_count: int = 0, interval_min: int = 5, interval_max: int = 10, target_channels: list = None, white_list_keywords: str = None, black_list_keywords: str = None):
         async with async_session() as session:
             # Get currrent status
             result = await session.execute(select(ExcelTask).where(ExcelTask.id == task_id))
@@ -499,6 +556,14 @@ class ExcelBatchService:
             task.interval_min = interval_min
             task.interval_max = interval_max
             task.status = new_status
+            if target_channels is not None:
+                task.target_channels = target_channels
+            
+            # Save keywords
+            if white_list_keywords is not None:
+                task.white_list_keywords = white_list_keywords
+            if black_list_keywords is not None:
+                task.black_list_keywords = black_list_keywords
             
             if not is_resume:
                 task.skip_count = skip_count

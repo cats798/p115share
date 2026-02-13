@@ -19,35 +19,40 @@
           <a-divider orientation="left">推送频道列表</a-divider>
           
           <div v-for="(channel, index) in tgChannels" :key="index" class="channel-item">
-            <a-row :gutter="16" align="middle">
-              <a-col :span="10">
-                <a-form-item :label="index === 0 ? 'Channel ID' : ''" :style="{ marginBottom: index === 0 ? '24px' : '8px' }">
-                  <a-input v-model:value="channel.id" placeholder="@channel_name 或 -100xxxx" />
-                </a-form-item>
+            <a-row :gutter="12" align="middle">
+              <a-col :flex="'180px'">
+                <a-input v-model:value="channel.id" placeholder="ID: @name / -100..." />
               </a-col>
-              <a-col :span="4">
-                <a-form-item :label="index === 0 ? '启用' : ''" :style="{ marginBottom: index === 0 ? '24px' : '8px' }">
-                  <a-switch v-model:checked="channel.enabled" />
-                </a-form-item>
+              <a-col :flex="'240px'">
+                <a-input-group compact style="display: flex">
+                  <a-input v-model:value="channel.name" disabled placeholder="频道名称" style="flex: 1" />
+                  <a-button @click="getChannelInfo(index)" :loading="channel.loading">获取</a-button>
+                </a-input-group>
               </a-col>
-              <a-col :span="4">
-                <a-form-item :label="index === 0 ? '简洁模式' : ''" :style="{ marginBottom: index === 0 ? '24px' : '8px' }">
-                  <a-switch v-model:checked="channel.concise" />
-                </a-form-item>
+              <a-col :flex="'auto'">
+                <a-space :size="12">
+                  <span class="switch-item">
+                    <span class="switch-label">启用</span>
+                    <a-switch v-model:checked="channel.enabled" size="small" />
+                  </span>
+                  <span class="switch-item">
+                    <span class="switch-label">简洁</span>
+                    <a-switch v-model:checked="channel.concise" size="small" />
+                  </span>
+                </a-space>
               </a-col>
-              <a-col :span="6" :style="{ paddingTop: index === 0 ? '24px' : '0' }">
-                <a-button type="link" danger @click="removeChannel(index)">
+              <a-col :flex="'60px'" style="text-align: right">
+                <a-button type="link" danger @click="removeChannel(index)" style="padding: 0">
                   <template #icon><DeleteOutlined /></template>
-                  删除
                 </a-button>
               </a-col>
             </a-row>
           </div>
           
-          <a-button type="dashed" block @click="addChannel" style="margin-bottom: 24px">
-            <template #icon><PlusOutlined /></template>
-            添加推送频道
-          </a-button>
+            <a-button type="dashed" block @click="addChannel" style="margin-bottom: 24px">
+              <template #icon><PlusOutlined /></template>
+              添加推送频道
+            </a-button>
 
           <a-form-item label="User ID" name="tg_user_id">
             <a-input v-model:value="formState.tg_user_id" placeholder="接收保存成功通知的用户 ID" />
@@ -189,6 +194,8 @@ interface ChannelConfig {
   id: string;
   enabled: boolean;
   concise: boolean;
+  name?: string;
+  loading?: boolean;
 }
 
 const tgChannels = ref<ChannelConfig[]>([]);
@@ -214,7 +221,7 @@ const formState = reactive({
 });
 
 const addChannel = () => {
-  tgChannels.value.push({ id: '', enabled: true, concise: false });
+  tgChannels.value.push({ id: '', enabled: true, concise: false, name: '' });
 };
 
 const removeChannel = (index: number) => {
@@ -369,6 +376,31 @@ const testProxy = async () => {
   }
 };
 
+const getChannelInfo = async (index: number) => {
+  const channel = tgChannels.value[index];
+  if (!channel) return;
+  
+  if (!channel.id) {
+    message.warning('请先输入频道 ID');
+    return;
+  }
+  
+  try {
+    channel.loading = true;
+    const res = await axios.post('/api/config/get-telegram-chat-name', { chat_id: channel.id });
+    if (res.data.status === 'success') {
+      channel.name = res.data.data.title;
+      message.success(`已获取频道名称: ${channel.name}`);
+    } else {
+      message.error(res.data.message);
+    }
+  } catch (e: any) {
+    message.error(e.response?.data?.message || '获取频道信息失败');
+  } finally {
+    channel.loading = false;
+  }
+};
+
 const detectProtocol = async () => {
   if (!formState.proxy_host || !formState.proxy_port) {
     message.warning('请先填写地址和端口');
@@ -379,7 +411,7 @@ const detectProtocol = async () => {
     const res = await axios.post('/api/config/detect-proxy-protocol', formState);
     if (res.data.status === 'success') {
       formState.proxy_type = res.data.protocol;
-      message.success(res.data.message);
+      message.success(res.data.protocol);
     } else {
       message.error(res.data.message);
     }
@@ -407,6 +439,17 @@ onMounted(loadConfig);
   margin-bottom: 12px;
   border: 1px solid #f0f0f0;
   transition: all 0.3s;
+}
+
+.switch-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.switch-label {
+  font-size: 13px;
+  color: rgba(0, 0, 0, 0.45);
 }
 
 .channel-item:hover {

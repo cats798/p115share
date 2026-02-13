@@ -17,7 +17,7 @@ class CleanupScheduler:
         self.update_cleanup_trash_job()
         self.update_cleanup_capacity_job()
         self.scheduler.start()
-        logger.info("⏰ 定时清理任务已启动")
+        logger.info("[TIME] 定时清理任务已启动")
 
     def update_cleanup_dir_job(self):
         """Update or remove the cleanup save directory job based on config"""
@@ -32,13 +32,13 @@ class CleanupScheduler:
                     args=[False], # wait=False
                     replace_existing=True
                 )
-                logger.info(f"✅ 已设置清理保存目录定时任务: {settings.P115_CLEANUP_DIR_CRON}")
+                logger.info(f"[OK] 已设置清理保存目录定时任务: {settings.P115_CLEANUP_DIR_CRON}")
             except Exception as e:
-                logger.error(f"❌ 设置清理保存目录定时任务失败: {e}")
+                logger.error(f"[ERROR] 设置清理保存目录定时任务失败: {e}")
         else:
             if self.scheduler.get_job(job_id):
                 self.scheduler.remove_job(job_id)
-                logger.info("🚫 已移除清理保存目录定时任务")
+                logger.info("[-] 已移除清理保存目录定时任务")
 
     def update_cleanup_trash_job(self):
         """Update or remove the cleanup recycle bin job based on config"""
@@ -53,13 +53,13 @@ class CleanupScheduler:
                     args=[False], # wait=False
                     replace_existing=True
                 )
-                logger.info(f"✅ 已设置清空回收站定时任务: {settings.P115_CLEANUP_TRASH_CRON}")
+                logger.info(f"[OK] 已设置清空回收站定时任务: {settings.P115_CLEANUP_TRASH_CRON}")
             except Exception as e:
-                logger.error(f"❌ 设置清空回收站定时任务失败: {e}")
+                logger.error(f"[ERROR] 设置清空回收站定时任务失败: {e}")
         else:
             if self.scheduler.get_job(job_id):
                 self.scheduler.remove_job(job_id)
-                logger.info("🚫 已移除清空回收站定时任务")
+                logger.info("[-] 已移除清空回收站定时任务")
     
     def update_cleanup_capacity_job(self):
         """Update or remove the capacity check job based on config"""
@@ -76,17 +76,17 @@ class CleanupScheduler:
                     name="自动检测网盘容量",
                     replace_existing=True
                 )
-                logger.info(f"✅ 已设置容量自动检测任务: 每 30 分钟一次 (阈值: {settings.P115_CLEANUP_CAPACITY_LIMIT} TB)")
+                logger.info(f"[OK] 已设置容量自动检测任务: 每 30 分钟一次 (阈值: {settings.P115_CLEANUP_CAPACITY_LIMIT} TB)")
             except Exception as e:
-                logger.error(f"❌ 设置容量自动检测任务失败: {e}")
+                logger.error(f"[ERROR] 设置容量自动检测任务失败: {e}")
         else:
             if self.scheduler.get_job(job_id):
                 self.scheduler.remove_job(job_id)
-                logger.info("🚫 已移除容量自动检测任务")
+                logger.info("[-] 已移除容量自动检测任务")
 
     def shutdown(self):
         """Shutdown the scheduler"""
         self.scheduler.shutdown()
-        logger.info("⏰ 定时清理任务已停止")
+        logger.info("[TIME] 定时清理任务已停止")
 
 cleanup_scheduler = CleanupScheduler()

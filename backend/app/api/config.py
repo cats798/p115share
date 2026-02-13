@@ -281,6 +281,18 @@ async def test_channel(user=Depends(get_current_user)):
         "details": results
     }
 
+class GetChatNameRequest(BaseModel):
+    chat_id: str
+
+@router.post("/get-telegram-chat-name")
+async def get_telegram_chat_name(req: GetChatNameRequest, user=Depends(get_current_user)):
+    """Get Telegram chat name by ID"""
+    info = await tg_service.get_chat_info(req.chat_id)
+    if info:
+        return {"status": "success", "data": info}
+    else:
+        return {"status": "error", "message": "无法获取频道信息，请检查 ID 是否正确或机器人是否在频道中"}
+
 @router.post("/cleanup-save-dir")
 async def cleanup_save_dir(user=Depends(get_current_user)):
     logger.info("🛠 用户手动触发清理保存目录")

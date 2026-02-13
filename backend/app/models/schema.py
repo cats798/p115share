@@ -53,6 +53,9 @@ class ExcelTask(Base):
     skip_count: Mapped[int] = mapped_column(Integer, default=0)
     current_row: Mapped[int] = mapped_column(Integer, default=0)
     is_waiting: Mapped[bool] = mapped_column(Boolean, default=False)
+    target_channels: Mapped[dict] = mapped_column(JSON, nullable=True)  # List of channel IDs to push to
+    white_list_keywords: Mapped[str] = mapped_column(Text, nullable=True)  # Comma separated
+    black_list_keywords: Mapped[str] = mapped_column(Text, nullable=True)  # Comma separated
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 class ExcelTaskItem(Base):
