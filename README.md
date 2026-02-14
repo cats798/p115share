@@ -11,17 +11,20 @@
 ## ✨ 核心功能
 
 ### 🤖 自动化机器人流程
+
 - **自动转存**：多平台链接支持（115.com, 115cdn.com, anxia.com），自动提取并保存至网盘。
 - **消息转发**：支持保留原始消息中的文字描述、图片和标签，并自动替换其中的链接。
 - **长期链接生成**：自动将转存后的文件创建为“永久有效”的分享链接。
 - **频道同步**：一键将处理结果发布到指定的 Telegram 频道。
 
 ### 📊 现代化管理面板
+
 - **实时仪表盘**：直观查看 Bot 连接状态与 115 登录状态。
 - **实时日志**：通过 WebSocket 实现的高性能日志查看器，支持历史回溯，随时掌握系统动向。
 - **快捷清理**：支持一键清空保存目录及清空 115 回收站。
 
 ### ⏰ 智能维护逻辑
+
 - **定时清理**：支持通过 Cron 表达式自定义保存目录与回收站的自动清理周期。
 - **任务互斥锁**：内置高效的并发控制（Mutex），确保转存分享与清理任务安全互斥，避免冲突。
 - **异常容错**：自动识别并处理 115 常见的业务错误（如文件已删除、重复接收等）。
@@ -82,6 +85,7 @@ docker compose up -d --build
 ```
 
 ### 初始化配置
+
 - 访问管理界面：`http://localhost:8000`
 - 进入 **[系统配置]** 页面，填写以下核心信息：
   - **115 Cookie**：您的 115 账号登录凭证。
@@ -91,6 +95,82 @@ docker compose up -d --build
   - **TG 频道 ID**：用于广播分享的频道 ID（**注意：Bot 必须被设为该频道的管理员才能发送消息**）。
   - **代理配置**（可选）：如需代理访问，可在"代理配置"面板中填写。
 - 点击"保存配置"后，系统将持续运行。
+
+---
+
+## 🛠 开发与运行
+
+如果您希望在本地进行开发或手动运行，请参考以下步骤。
+
+### 🐍 后端开发 (Backend)
+
+后端使用 **FastAPI** 框架。
+
+1. **环境准备**：
+   - Python 3.11+
+   - 建议创建虚拟环境：
+
+     ```bash
+     cd backend
+     python -m venv venv
+     # Windows
+     .\venv\Scripts\activate
+     # Linux/macOS
+     source venv/bin/activate
+     ```
+
+2. **安装依赖**：
+
+   ```bash
+   pip install -r requirements.txt
+   # 安装核心组件
+   pip install p115client
+   ```
+
+3. **运行服务**：
+
+   ```bash
+   # 在 backend 目录下运行
+   python -m app.main
+   ```
+
+   *默认 API 端口为 8000。*
+
+### 🎨 前端开发 (Frontend)
+
+前端使用 **Vue 3 + Vite + Ant Design Vue**。
+
+1. **环境准备**：
+   - Node.js 20+
+   - npm 或 pnpm
+
+2. **安装依赖**：
+
+   ```bash
+   cd frontend
+   npm install
+   ```
+
+3. **本地开发运行**：
+
+   ```bash
+   npm run dev
+   ```
+
+   *前端开发服务器默认运行在 `http://localhost:5173`。Vite 已配置代理，会自动将 `/api` 请求转发到 `localhost:8000`。*
+
+4. **构建生产环境代码**：
+
+   ```bash
+   npm run build
+   ```
+
+   *构建产物将存放在 `dist` 目录。在 Docker 部署中，这些文件会被复制到后端的 `static` 目录。*
+
+### 🔗 前后端联调
+
+- **本地开发**：同时启动后端 (`python -m app.main`) 和前端 (`npm run dev`)。访问 `http://localhost:5173` 即可进行开发。
+- **静态部署**：前端构建后的 `dist` 文件夹内容放置在 `backend/static` 下，访问后端端口即可直接查看完整应用。
 
 ---
 
@@ -136,6 +216,7 @@ docker compose up -d --build
 ---
 
 ## 🤝 贡献
+
 欢迎提交 Issue 或 Pull Request！
 
 **Created by Listening © 2026**

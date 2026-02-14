@@ -462,4 +462,8 @@ onMounted(loadConfig);
   background: #1f1f1f !important;
   border: 1px solid #303030 !important;
 }
+
+.dark .switch-label {
+  color: rgba(255, 255, 255, 0.45) !important;
+}
 </style>
