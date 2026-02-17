@@ -679,9 +679,10 @@ class P115Service:
             return res
         except Exception as e:
             error_msg = str(e)
-            # 检查是否为链接失效错误 (errno 4100009)
-            if "4100009" in error_msg or "链接已失效" in error_msg:
-                logger.warning(f"⏰ 检查链接状态发现链接已失效: {share_url}")
+            # 检查是否为链接失效或取消错误 (errno 4100009 或 4100010)
+            if any(code in error_msg for code in ["4100009", "4100010"]) or \
+               any(msg in error_msg for msg in ["链接已失效", "分享已取消"]):
+                logger.warning(f"⏰ 检查链接状态发现链接已失效或被取消: {share_url}")
                 return {
                     "share_state": 7,
                     "is_auditing": False,
