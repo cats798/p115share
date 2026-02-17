@@ -212,7 +212,14 @@ class TGService:
                     await message.reply(f"🔔 链接保存成功！\n原链接: {share_url}\n新分享: {history_share_link}")
                     return True, history_share_link
 
-                # 1. Save link with metadata
+                # 1. Check queue status
+                q_size = p115_service.queue_size
+                is_busy = p115_service.is_busy
+                if q_size > 0 or is_busy:
+                    position = q_size + (1 if is_busy else 0)
+                    await message.reply(f"⏳ 系统繁忙，您的请求已加入队列（当前排在第 {position} 位），请稍候...")
+
+                # 2. Save link with metadata
                 # Use segmented metadata if available
                 metadata = {
                     "description": full_text.strip(),

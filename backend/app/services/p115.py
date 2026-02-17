@@ -29,8 +29,45 @@ class P115Service:
         self._task_lock: Optional[asyncio.Lock] = None  # Lazy initialize
         self._current_task: str | None = None  # Track current task type
         self._save_dir_cid: int = 0  # Cached save directory CID
+        # 任务队列机制
+        self._task_queue = asyncio.Queue()
+        self._worker_task = None
+        self._worker_lock = asyncio.Lock()
+        self._current_task_info = None # 存储当前正在处理的任务信息
+        
         if settings.P115_COOKIE:
             self.init_client(settings.P115_COOKIE)
+
+    @property
+    def queue_size(self) -> int:
+        """返回当前在队列中等待的任务数量"""
+        return self._task_queue.qsize()
+
+    @property
+    def is_busy(self) -> bool:
+        """如果 Worker 正在处理任务则返回 True"""
+        return self._current_task_info is not None
+
+    async def _task_worker(self):
+        """后台任务处理 Worker"""
+        logger.info("🚀 P115 任务队列 Worker 已启动")
+        while True:
+            # 获取任务：(task_func, args, kwargs, future, task_type)
+            task_func, args, kwargs, future, task_type = await self._task_queue.get()
+            self._current_task_info = task_type
+            try:
+                logger.info(f"⚡ 队列正在处理任务: {task_type}")
+                # 执行具体逻辑
+                result = await task_func(*args, **kwargs)
+                if not future.done():
+                    future.set_result(result)
+            except Exception as e:
+                logger.error(f"❌ 队列执行任务 {task_type} 出错: {e}")
+                if not future.done():
+                    future.set_exception(e)
+            finally:
+                self._task_queue.task_done()
+                self._current_task_info = None
 
     async def _api_call_with_timeout(
         self,
@@ -105,36 +142,25 @@ class P115Service:
 
     @asynccontextmanager
     async def _acquire_task_lock(self, task_type: Literal["save_share", "cleanup"], wait: bool = True):
-        """Acquire task lock with optional wait/non-blocking support.
-        
-        Args:
-            task_type: The type of task requesting the lock.
-            wait: If True, wait for the lock. If False and locked, skip execution.
+        """已废弃：改为使用任务队列排队处理。
+        为了兼容性保留接口，实际逻辑改为在队列中排队。
         """
-        if self._task_lock is None:
-            self._task_lock = asyncio.Lock()
-            
-        max_wait = 2100  # 35 minutes max wait
-        
-        if self._task_lock.locked():
-            if not wait:
-                logger.debug(f"⏭️ {task_type} 任务检测到冲突且设置为不等待，自动跳过 (当前占用: {self._current_task})")
-                raise BlockingIOError(f"Task lock busy: {self._current_task}")
-            logger.info(f"⏳ {task_type} 任务等待中，当前任务: {self._current_task}")
-        
-        try:
-            await asyncio.wait_for(self._task_lock.acquire(), timeout=max_wait)
-        except asyncio.TimeoutError:
-            raise TimeoutError(f"等待任务锁超时 ({max_wait}s): {task_type}，当前占用: {self._current_task}")
-        
-        self._current_task = task_type
-        logger.info(f"🔒 {task_type} 任务已获取锁")
-        try:
-            yield
-        finally:
-            self._current_task = None
-            self._task_lock.release()
-            logger.info(f"🔓 {task_type} 任务已释放锁")
+        # 注意：清理任务目前仍可保持同步等待，但建议所有 115 写操作都过队列
+        # 这里为了最小化变动，暂时仅针对 share 链接进行队列化
+        yield
+
+    async def _enqueue_op(self, task_type: str, func, *args, **kwargs):
+        """将操作放入队列并等待结果"""
+        # 确保 Worker 正在运行
+        if self._worker_task is None or self._worker_task.done():
+            async with self._worker_lock:
+                if self._worker_task is None or self._worker_task.done():
+                    self._worker_task = asyncio.create_task(self._task_worker())
+                    logger.info("⚡ 延迟启动 P115 任务队列 Worker")
+
+        future = asyncio.get_running_loop().create_future()
+        await self._task_queue.put((func, args, kwargs, future, task_type))
+        return await future
 
     async def verify_connection(self) -> bool:
         """Verify the 115 cookie connection"""
@@ -233,29 +259,25 @@ class P115Service:
         raise RuntimeError(f"无法确保保存目录 {path} 存在 (已重试3次): {last_error}")
 
     async def save_share_link(self, share_url: str, metadata: dict = None, target_dir: Optional[str] = None):
-        """Public API with its own locking"""
-        async with self._acquire_task_lock("save_share"):
-            return await self._save_share_link_internal(share_url, metadata, target_dir)
+        """通过队列保存链接"""
+        return await self._enqueue_op("save_share", self._save_share_link_internal, share_url, metadata, target_dir)
 
     async def save_and_share(self, share_url: str, metadata: dict = None, target_dir: Optional[str] = None):
-        """Unified save and share with a single lock duration"""
-        async with self._acquire_task_lock("save_share"):
+        """通过队列进行转存并分享"""
+        async def _internal_flow():
             save_res = await self._save_share_link_internal(share_url, metadata, target_dir)
             if save_res and save_res.get("status") == "success":
-                # Create share link while still holding the lock
                 share_link = await self.create_share_link(save_res)
                 if share_link:
-                    return {
-                        "status": "success",
-                        "share_link": share_link
-                    }
-                else:
-                    return {
-                        "status": "error",
-                        "error_type": "share_failed",
-                        "message": "转存成功但在由于文件未同步或网络问题，生成分享链接失败"
-                    }
+                    return {"status": "success", "share_link": share_link}
+                return {
+                    "status": "error",
+                    "error_type": "share_failed",
+                    "message": "转存成功但生成分享链接失败"
+                }
             return save_res
+
+        return await self._enqueue_op(f"save_and_share({share_url})", _internal_flow)
 
     async def _save_share_link_internal(self, share_url: str, metadata: dict = None, target_dir: Optional[str] = None):
         """Internal logic for saving a 115 share link (no locking)"""
