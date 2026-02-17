@@ -267,16 +267,9 @@ class P115Service:
         async def _internal_flow():
             save_res = await self._save_share_link_internal(share_url, metadata, target_dir)
             if save_res and save_res.get("status") == "success":
-                share_res = await self.create_share_link(save_res)
-                if isinstance(share_res, str):
-                    return {"status": "success", "share_link": share_res}
-                elif isinstance(share_res, dict) and share_res.get("status") == "error":
-                    # 将创建分享时的特定错误映射回转存结果
-                    return {
-                        "status": "error",
-                        "error_type": share_res.get("error_type", "share_failed"),
-                        "message": share_res.get("message", "生成分享链接失败")
-                    }
+                share_link = await self.create_share_link(save_res)
+                if share_link:
+                    return {"status": "success", "share_link": share_link}
                 return {
                     "status": "error",
                     "error_type": "share_failed",
@@ -322,11 +315,14 @@ class P115Service:
             
             logger.info(f"📊 分享状态: {share_state}, 标题: {share_title}, 违规标志: {have_vio_file}")
 
-            # 即使包含违规内容标志，也尝试继续处理，因为很多时候文件列表依然可用
+            # 优先判断违规内容，无论审核状态如何
             if have_vio_file == 1:
-                logger.warning(f"⚠️ 分享链接包含违规内容标志 (have_vio_file=1): {share_url}")
-                # 不再直接返回错误，允许逻辑继续执行以检查 items 列表
-
+                logger.warning(f"🚫 分享链接包含违规内容: {share_url}")
+                return {
+                    "status": "error",
+                    "error_type": "violated",
+                    "message": "链接包含违规内容"
+                }
 
             if share_state == 0:
                 logger.info(f"🔍 分享链接处于审核中，进入轮询等待队列: {share_url}")
@@ -362,13 +358,7 @@ class P115Service:
             
             items = data.get("list", [])
             if not items:
-                logger.warning(f"⚠️ 分享链接内没有文件。have_vio_file={have_vio_file}, 状态: {snap_resp.get('state')}")
-                if have_vio_file == 1:
-                    return {
-                        "status": "error",
-                        "error_type": "violated",
-                        "message": "链接包含违规内容，无法转存分享"
-                    }
+                logger.warning(f"⚠️ 分享链接内没有文件。完整响应状态: {snap_resp.get('state')}")
                 return {
                     "status": "error",
                     "error_type": "empty_share",
@@ -464,9 +454,10 @@ class P115Service:
                 errno_val = error_info.get("errno") if isinstance(error_info, dict) else None
                 
                 if errno_val == 4200044 or "超过当前等级限制" in str(recv_error):
-                    logger.warning(f"⚠️ 触发 115 非会员 500 文件保存限制，尝试递归分批保存: {share_url}")
-                    recursive_links = await self._save_share_recursive(share_url, to_cid)
-                    logger.info(f"✅ 递归分批保存指令已处理完毕: {share_url}")
+                    logger.warning(f"⚠️ 触发 115 非会员 500 文件保存限制，尝试高性能聚合转存: {share_url}")
+                    # 使用方案 3 的聚合转存
+                    recursive_links = await self._save_share_aggregate(share_url, to_cid)
+                    logger.info(f"✅ 聚合分享保存指令已处理完毕: {share_url}")
                 # Check if it's a "file already received" error (errno 4200045)
                 elif "4200045" in str(recv_error) or "已经接收" in str(recv_error):
                     logger.warning(f"⚠️ 115 提示文件该分享已接收过: {share_url}")
@@ -504,8 +495,7 @@ class P115Service:
                 "names": names,
                 "share_url": share_url,
                 "recursive_links": recursive_links if 'recursive_links' in locals() else [],
-                "metadata": metadata or {},
-                "have_vio": have_vio_file == 1
+                "metadata": metadata or {}  # Include metadata in return value
             }
         except Exception as e:
             # 彻底避免 loguru 格式化异常时可能触发的 KeyError
@@ -517,7 +507,7 @@ class P115Service:
             except:
                 error_msg = "未知异常"
             
-            logger.error("❌ 保存分享链接发生程序异常: {}", error_msg)
+            logger.error(f"❌ 保存分享链接发生程序异常: {error_msg}")
             return {
                 "status": "error",
                 "error_type": "exception",
@@ -582,8 +572,9 @@ class P115Service:
             
             # 1. 记录结构并创建子目录
             for d in dirs:
-                share_cid = d["id"]
-                name = d["name"]
+                share_cid = d.get("id") or d.get("cid")
+                name = d.get("name") or d.get("n") or ""
+                if share_cid is None: continue
                 share_structure[share_cid] = (pid, name)
                 try:
                     resp = await self._api_call_with_timeout(
@@ -603,7 +594,7 @@ class P115Service:
                         logger.error(f"❌ 递归保存过程中创建子目录 {name} 失败: {e}")
             
             # 2. 分批转存该目录下的文件
-            fids = [str(f["id"]) for f in files]
+            fids = [str(f.get("id") or f.get("fid")) for f in files if (f.get("id") or f.get("fid")) is not None]
             if not fids:
                 continue
                 
@@ -673,6 +664,188 @@ class P115Service:
                         continue
                     logger.error(f"❌ 递归转存文件包失败: {e}")
         
+        return share_links
+
+    async def _scan_share_all(self, share_code: str, receive_code: str):
+        """扫描全量分享文件结构"""
+        files_to_save = [] # List of (rel_path_tuple, fid, name)
+        dirs_to_create = set() # Set of rel_path_tuple
+        
+        async for pid, dirs, files in share_iterdir_walk(
+            self.client, share_code, receive_code, async_=True
+        ):
+            # 获取当前路径（这里比较复杂，因为 share_iterdir_walk 没直接给路径，需要我们追踪）
+            # 简化逻辑：我们已经有了 share_iterdir_walk 提供的层级关系。
+            # 但实际上，如果我们只要聚合转存，我们只需要 FID 列表。
+            # 为了“归位”，我们需要知道每个文件应该去哪个 CID。
+            pass
+        # 考虑到 share_iterdir_walk 的实现，重新设计一个能获取路径的扫描
+
+    async def _save_share_aggregate(self, share_url: str, target_root_cid: int) -> list[str]:
+        """方案 3：聚合转存（高性能模式）"""
+        payload = share_extract_payload(share_url)
+        share_code = payload["share_code"]
+        receive_code = payload["receive_code"] or ""
+        share_links = []
+        
+        # 1. 扫描与建立映射
+        logger.info("🔍 正在扫描分享链接全量结构...")
+        all_files = [] # [(rel_path_list, fid, name)]
+        
+        # 记录每个 share_cid 对应的相对路径
+        path_map = {0: []} # {share_pid: [path_parts]}
+        
+        try:
+            count = 0
+            async for pid, dirs, files in share_iterdir_walk(
+                self.client, share_code, receive_code, async_=True
+            ):
+                curr_path = path_map.get(pid, [])
+                for d in dirs:
+                    share_id = d.get("id") or d.get("cid")
+                    share_name = d.get("name") or d.get("n") or ""
+                    if share_id is not None:
+                        path_map[share_id] = curr_path + [share_name]
+                for f in files:
+                    file_id = f.get("id") or f.get("fid")
+                    file_name = f.get("n") or f.get("name") or f.get("file_name") or ""
+                    if file_id is not None:
+                        all_files.append((curr_path, str(file_id), file_name))
+                
+                count += 1
+                if count % 100 == 0:
+                    logger.info(f"⏳ 扫描进度: 已发现 {len(all_files)} 个文件...")
+                
+                # 🚦 增加微小延迟，避免高频请求导致 115 封禁或会话失效
+                await asyncio.sleep(0.05)
+                
+            total_files = len(all_files)
+            logger.info(f"📊 扫描完成，共计 {total_files} 个文件")
+        except Exception as scan_e:
+            logger.error(f"❌ 扫描分享链接结构失败: {scan_e}")
+            # 如果扫描失败但已经拿到了一些文件，可以尝试强制继续，但通常建议报错
+            raise
+
+        # 如果文件数没超过 50 =_= 
+        if total_files <= 50:
+            logger.info("ℹ️ 文件总数较少，回退至常规递归模式以保证稳定性")
+            return await self._save_share_recursive(share_url, target_root_cid)
+
+        # 2. 预建目录树
+        logger.info("🌳 正在预建远程目录树...")
+        cid_mapping = {tuple(): target_root_cid} # {rel_path_tuple: user_cid}
+        
+        # 收集所有需要创建的目录路径并排序（确保父目录先创建）
+        all_dir_paths = sorted(list(set(tuple(f[0]) for f in all_files if f[0])), key=len)
+        
+        for p_tuple in all_dir_paths:
+            full_path = p_tuple
+            parent_tuple = full_path[:-1]
+            dir_name = full_path[-1]
+            parent_cid = cid_mapping[parent_tuple]
+            
+            try:
+                resp = await self._api_call_with_timeout(
+                    self.client.fs_makedirs_app, dir_name, pid=parent_cid, async_=True
+                )
+                check_response(resp)
+                new_cid = int(resp.get("cid") or resp.get("id") or (resp.get("data") or {}).get("cid") or 0)
+                cid_mapping[full_path] = new_cid
+            except Exception as e:
+                # 处理已存在的目录
+                found = await self._find_files_in_dir(parent_cid, [dir_name])
+                if found:
+                    cid_mapping[full_path] = int(found[0]["fid"])
+                else:
+                    logger.error(f"❌ 创建目录 {dir_name} 失败: {e}")
+
+        # 3. 创建临时“着陆场”
+        buffer_name = f"_tmp_transfer_{int(time.time())}"
+        resp = await self._api_call_with_timeout(
+            self.client.fs_makedirs_app, buffer_name, pid=target_root_cid, async_=True
+        )
+        check_response(resp)
+        buffer_cid = int(resp.get("cid") or resp.get("id") or (resp.get("data") or {}).get("cid") or 0)
+        
+        # 4. 聚合转存与批量移动
+        logger.info("🚀 开始聚合搬运流程...")
+        files_processed = 0
+        
+        # 按 500 个一组处理
+        for i in range(0, total_files, 500):
+            batch_data = all_files[i:i+500]
+            batch_fids = [f[1] for f in batch_data]
+            
+            # A. 执行转存
+            recv_payload = {
+                "share_code": share_code,
+                "receive_code": receive_code,
+                "file_id": ",".join(batch_fids),
+                "cid": buffer_cid
+            }
+            recv_resp = await self._api_call_with_timeout(
+                self.client.share_receive, recv_payload, async_=True,
+                timeout=API_TIMEOUT, label=f"agg_receive({i//500})"
+            )
+            check_response(recv_resp)
+            
+            # 必须等待一小会，否则 fs_files 可能扫不到新存入的文件
+            await asyncio.sleep(2)
+            
+            # B. 扫描“着陆场”获取新 FID
+            ls_resp = await self._api_call_with_timeout(self.client.fs_files, buffer_cid, async_=True)
+            new_items = ls_resp.get("data", [])
+            if isinstance(new_items, dict):
+                new_items = new_items.get("list", [])
+                
+            # 这里的匹配逻辑：115 转存后名字不变（除非重名）。
+            # 因为我们每波都清空缓冲，所以名字应该是对应的。
+            # 为了绝对安全，按名字映射
+            name_to_new_fid = {item.get("n", item.get("file_name")): item.get("fid") or item.get("cid") for item in new_items}
+            
+            # C. 批量归位（按目标目录分组移动）
+            # move_map: {target_cid: [new_fids]}
+            move_map = {}
+            for rel_path, _, name in batch_data:
+                new_fid = name_to_new_fid.get(name)
+                if not new_fid:
+                    # 如果没找到，可能是 115 处理慢，再搜一遍
+                    logger.debug(f"🔍 暂未在缓冲中直接发现 {name}，尝试搜索...")
+                    search_res = await self._find_files_in_dir(buffer_cid, [name])
+                    if search_res:
+                        new_fid = search_res[0]["fid"]
+                
+                if new_fid:
+                    target_cid = cid_mapping[tuple(rel_path)]
+                    if target_cid not in move_map:
+                        move_map[target_cid] = []
+                    move_map[target_cid].append(new_fid)
+
+            # 执行移动
+            for t_cid, fids_to_move in move_map.items():
+                try:
+                    move_resp = await self._api_call_with_timeout(
+                        self.client.fs_move, ",".join(fids_to_move), t_cid, async_=True
+                    )
+                    check_response(move_resp)
+                except Exception as move_e:
+                    logger.error(f"❌ 批量移动失败: {move_e}")
+
+            files_processed += len(batch_data)
+            logger.info(f"📊 聚合处理进度: {files_processed}/{total_files}")
+            
+            # 转存配额限制休眠
+            await asyncio.sleep(random.randint(3, 5))
+
+        # 5. 清理
+        try:
+            await self._api_call_with_timeout(
+                self.client.fs_delete, str(buffer_cid), async_=True
+            )
+            logger.info("🧹 临时着陆场已清理")
+        except:
+            pass
+            
         return share_links
 
     async def get_share_status(self, share_url: str):
@@ -976,16 +1149,6 @@ class P115Service:
             
         except Exception as e:
             logger.error(f"❌ 创建新分享链接失败: {e}")
-            # 检查是否是由于违规导致的空文件夹分享失败 (errno 4100016)
-            error_info = getattr(e, "args", [None, {}])[1] if hasattr(e, "args") and len(e.args) >= 2 else {}
-            errno_val = error_info.get("errno") if isinstance(error_info, dict) else None
-            
-            if errno_val == 4100016 and save_result.get("have_vio"):
-                return {
-                    "status": "error",
-                    "error_type": "violated",
-                    "message": "链接包含违规内容，无法转存分享"
-                }
             return None
 
     async def cleanup_save_directory(self, wait: bool = True):

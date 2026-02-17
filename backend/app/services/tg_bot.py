@@ -402,7 +402,7 @@ class TGService:
                     if err_type == "expired":
                         error_text = "⚠️ 分享链接已过期"
                     elif err_type == "violated":
-                        error_text = "🚫 分享链接包含违规内容"
+                        error_text = f"🚫 {last_res.get('message') or '分享链接包含违规内容'}"
                     elif last_res.get("message"):
                         error_text = f"❌ {last_res.get('message')}"
                 
@@ -469,10 +469,9 @@ class TGService:
                 continue
             
             if status_info["is_prohibited"]:
-                logger.warning(f"🚫 轮询检测到链接包含违规内容: {share_url}")
-                await message.reply(f"🚫 链接审核未通过：检测到违规内容，无法继续处理。\n链接: {share_url}")
-                await self._delete_pending_task(pending_info.get("db_id"))
-                return
+                logger.warning(f"⚠️ 轮询检测到链接包含违规内容标志: {share_url}")
+                # 不再直接终止，允许在后续 is_auditing 为 false 时尝试转存
+
                 
             if status_info["is_expired"]:
                 logger.warning(f"⏰ 轮询检测到链接已过期: {share_url}")
@@ -505,7 +504,14 @@ class TGService:
                     return 
                 else:
                     logger.error(f"❌ 审核通过后转存仍然失败: {share_url}")
-                    await message.reply(f"❌ 链接审核已通过，但自动转存失败，请手动尝试: {share_url}")
+                    error_msg = "自动转存失败，请手动尝试"
+                    if isinstance(save_res, dict):
+                        if save_res.get("error_type") == "violated":
+                            error_msg = save_res.get("message") or "链接包含违规内容，无法转存分享"
+                        elif save_res.get("message"):
+                            error_msg = save_res.get("message")
+                    
+                    await message.reply(f"❌ 链接审核已通过，但{error_msg}: {share_url}")
                     await self._delete_pending_task(pending_info.get("db_id"))
                     return
         
