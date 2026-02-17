@@ -516,7 +516,6 @@ class TGService:
         
         new_entities = []
         if entities:
-            from aiogram.types import MessageEntity
             for e in entities:
                 is_dict = isinstance(e, dict)
                 offset = e.get("offset") if is_dict else e.offset
@@ -529,9 +528,10 @@ class TGService:
                     if is_dict:
                         e_copy = e.copy()
                         e_copy["offset"] = new_offset
-                        new_entities.append(MessageEntity(**e_copy))
+                        new_entities.append(e_copy)
                     else:
-                        e_copy = e.model_copy(update={"offset": new_offset})
+                        e_copy = e.model_dump() if hasattr(e, "model_dump") else dict(e)
+                        e_copy["offset"] = new_offset
                         new_entities.append(e_copy)
                 elif offset < end_u16 and (offset + length) > start_u16:
                     # Partially contained - slice it
@@ -543,9 +543,11 @@ class TGService:
                         e_copy = e.copy()
                         e_copy["offset"] = new_offset
                         e_copy["length"] = new_length
-                        new_entities.append(MessageEntity(**e_copy))
+                        new_entities.append(e_copy)
                     else:
-                        e_copy = e.model_copy(update={"offset": new_offset, "length": new_length})
+                        e_copy = e.model_dump() if hasattr(e, "model_dump") else dict(e)
+                        e_copy["offset"] = new_offset
+                        e_copy["length"] = new_length
                         new_entities.append(e_copy)
                         
         return new_text, new_entities

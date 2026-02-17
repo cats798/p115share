@@ -352,7 +352,10 @@ class P115Service:
                 fid = item.get("fid") or item.get("cid")
                 if fid:
                     fids.append(str(fid))
-                    names.append(item.get("n", "未知"))
+                    # 115 share_snap returns names with unnecessary escapes sometimes (e.g. \' for ')
+                    raw_name = item.get("n", "未知")
+                    cleaned_name = raw_name.replace("\\'", "'").replace('\\"', '"')
+                    names.append(cleaned_name)
                 else:
                     logger.warning(f"Item missing both fid and cid: {item}")
             
