@@ -34,6 +34,7 @@ class P115Service:
         self._worker_task = None
         self._worker_lock = asyncio.Lock()
         self._current_task_info = None # 存储当前正在处理的任务信息
+        self._restriction_until: float = 0 # 限制结束的时间戳
         
         if settings.P115_COOKIE:
             self.init_client(settings.P115_COOKIE)
@@ -45,8 +46,24 @@ class P115Service:
 
     @property
     def is_busy(self) -> bool:
-        """如果 Worker 正在处理任务则返回 True"""
-        return self._current_task_info is not None
+        """如果 Worker 正在处理任务或者处于限制状态则返回 True"""
+        return self._current_task_info is not None or self.is_restricted
+
+    @property
+    def is_restricted(self) -> bool:
+        """检查当前是否处于 115 限制状态"""
+        return time.time() < self._restriction_until
+
+    def set_restriction(self, hours: float = 1.0):
+        """设置全局限制状态"""
+        self._restriction_until = time.time() + (hours * 3600)
+        logger.warning(f"🚫 115 服务已进入全局限制模式，预计持续 {hours} 小时 (直到 {time.strftime('%H:%M:%S', time.localtime(self._restriction_until))})")
+
+    def clear_restriction(self):
+        """清除全局限制状态"""
+        if self._restriction_until > 0:
+            self._restriction_until = 0
+            logger.info("🔓 115 全局限制模式已解除")
 
     async def _task_worker(self):
         """后台任务处理 Worker"""
@@ -328,14 +345,16 @@ class P115Service:
                 # 不再直接返回错误，允许逻辑继续执行以检查 items 列表
 
 
-            if share_state == 0:
-                logger.info(f"🔍 分享链接处于审核中，进入轮询等待队列: {share_url}")
+            is_snapshotting = "正在生成文件快照" in str(snap_resp)
+            if share_state == 0 or is_snapshotting:
+                reason = "snapshotting" if is_snapshotting else "auditing"
+                logger.info(f"🔍 分享链接处于{ '审核中' if reason == 'auditing' else '快照生成中' }，进入轮询等待队列: {share_url}")
                 # Save to DB for persistence
                 async with async_session() as session:
                     new_task = PendingLink(
                         share_url=share_url,
                         metadata_json=metadata or {},
-                        status="auditing"
+                        status=reason
                     )
                     session.add(new_task)
                     await session.commit()
@@ -343,6 +362,7 @@ class P115Service:
                 
                 return {
                     "status": "pending",
+                    "reason": reason,
                     "share_url": share_url,
                     "metadata": metadata or {},
                     "db_id": db_id
@@ -517,6 +537,49 @@ class P115Service:
             except:
                 error_msg = "未知异常"
             
+            if "正在生成文件快照" in error_msg:
+                logger.info(f"🔍 分享链接正在生成快照，进入轮询等待队列: {share_url}")
+                async with async_session() as session:
+                    new_task = PendingLink(
+                        share_url=share_url,
+                        metadata_json=metadata or {},
+                        status="snapshotting"
+                    )
+                    session.add(new_task)
+                    await session.commit()
+                    db_id = new_task.id
+                
+                return {
+                    "status": "pending",
+                    "reason": "snapshotting",
+                    "share_url": share_url,
+                    "metadata": metadata or {},
+                    "db_id": db_id
+                }
+            
+            # 检查是否由于账号限制导致失败
+            if "限制接收" in error_msg:
+                logger.warning(f"🚫 触发 115 接收限制: {share_url}")
+                self.set_restriction(hours=1.0) # 设置 1 小时全局限制
+                
+                async with async_session() as session:
+                    new_task = PendingLink(
+                        share_url=share_url,
+                        metadata_json=metadata or {},
+                        status="restricted"
+                    )
+                    session.add(new_task)
+                    await session.commit()
+                    db_id = new_task.id
+                
+                return {
+                    "status": "pending",
+                    "reason": "restricted",
+                    "share_url": share_url,
+                    "metadata": metadata or {},
+                    "db_id": db_id
+                }
+
             logger.error("❌ 保存分享链接发生程序异常: {}", error_msg)
             return {
                 "status": "error",
@@ -701,13 +764,18 @@ class P115Service:
             share_title = share_info.get("share_title", "")
             have_vio_file = share_info.get("have_vio_file", 0)
             
+            is_snapshotting = "正在生成文件快照" in str(snap_resp)
             res = {
                 "share_state": share_state,
                 "is_auditing": share_state == 0,
+                "is_snapshotting": is_snapshotting,
+                "is_pending": share_state == 0 or is_snapshotting,
                 "is_expired": share_state == 7,
                 "is_prohibited": have_vio_file == 1,
                 "title": share_title
             }
+            if is_snapshotting:
+                logger.info(f"📊 检查链接发现正在生成快照: {share_url}")
             logger.debug(f"📊 检查链接状态: {share_url} -> {res}")
             return res
         except Exception as e:
@@ -720,6 +788,17 @@ class P115Service:
                     "share_state": 7,
                     "is_auditing": False,
                     "is_expired": True,
+                    "is_prohibited": False,
+                    "title": ""
+                }
+            if "正在生成文件快照" in error_msg:
+                logger.info(f"📊 检查链接状态发现正在生成快照: {share_url}")
+                return {
+                    "share_state": 0,
+                    "is_auditing": False,
+                    "is_snapshotting": True,
+                    "is_pending": True,
+                    "is_expired": False,
                     "is_prohibited": False,
                     "title": ""
                 }
@@ -986,6 +1065,19 @@ class P115Service:
                     "error_type": "violated",
                     "message": "链接包含违规内容，无法转存分享"
                 }
+            
+            # 检查分享限制
+            error_msg = str(e)
+            if "限制分享" in error_msg:
+                logger.warning(f"🚫 触发 115 分享限制")
+                self.set_restriction(hours=1.0)
+                return {
+                    "status": "pending",
+                    "reason": "restricted",
+                    "share_url": save_result.get("share_url"),
+                    "metadata": save_result.get("metadata", {})
+                }
+
             return None
 
     async def cleanup_save_directory(self, wait: bool = True):

@@ -248,8 +248,15 @@ class TGService:
                             await message.reply(f"🔔 链接保存成功！\n原链接: {share_url}\n新分享: {share_link}")
                             return True, share_link
                     elif save_res.get("status") == "pending":
-                        # Audit handled by the polling logic (consistent with current design)
-                        logger.info(f"🔍 分享链接正在审核中: {share_url}")
+                        # Handle different pending reasons
+                        reason = save_res.get("reason", "auditing")
+                        if reason == "snapshotting":
+                            logger.info(f"🔍 分享链接正在生成快照: {share_url}")
+                            if total_links == 1:
+                                await status_msg.edit_text("🔍 分享链接正在生成快照，请稍后，系统将自动重试处理")
+                        else:
+                            logger.info(f"🔍 分享链接正在审核中: {share_url}")
+                        
                         asyncio.create_task(self.poll_pending_link(message, save_res))
                         return "pending", None
                     elif save_res.get("status") == "error":
@@ -414,7 +421,7 @@ class TGService:
             # Final notification for batch
             result_text = f"✅ 批量处理完成！\n\n成功: {success_count}\n"
             if pending_count:
-                result_text += f"⏳ 审核中 (转换后自动发布): {pending_count}\n"
+                result_text += f"⏳ 审核/快照中 (转换后自动发布): {pending_count}\n"
             if failed_count:
                 result_text += f"❌ 失败: {failed_count}\n"
                 # Add detailed failure information
@@ -455,8 +462,21 @@ class TGService:
         """Poll the status of a pending link and process it when ready"""
         share_url = pending_info["share_url"]
         metadata = pending_info.get("metadata", {})
-        max_attempts = 36  # 3 hours (5 mins * 36)
-        interval = 300   # 5 minutes
+        reason = pending_info.get("reason", "auditing")
+        
+        # 正在生成快照或受限的链接轮询频率较低
+        if reason == "snapshotting":
+            interval = 1800 
+        elif reason == "restricted":
+            interval = 3600
+            if attempt == 1:
+                await message.reply(f"⚠️ 触发 115 账号限制（接收/分享），该链接已进入排队，将每小时尝试一次直到恢复。\n链接: {share_url}")
+        else:
+            interval = 300
+            
+        max_attempts = 36  
+        
+        logger.info(f"⏳ 开始为链接启动轮询任务 (原因: {reason}, 间隔: {interval}s): {share_url}")
         
         for attempt in range(1, max_attempts + 1):
             await asyncio.sleep(interval)
@@ -472,15 +492,19 @@ class TGService:
                 logger.warning(f"⚠️ 轮询检测到链接包含违规内容标志: {share_url}")
                 # 不再直接终止，允许在后续 is_auditing 为 false 时尝试转存
 
-                
+                                
             if status_info["is_expired"]:
                 logger.warning(f"⏰ 轮询检测到链接已过期: {share_url}")
                 await message.reply(f"⏰ 链接已失效：在审核期间该分享已过期。\n链接: {share_url}")
                 await self._delete_pending_task(pending_info.get("db_id"))
                 return
 
-            if not status_info["is_auditing"]:  # Audit passed
-                logger.info(f"🎉 链接审核已通过 (status: {status_info['share_state']}): {share_url}")
+            if not status_info["is_pending"]:  # Not pending anymore (Audit passed and Snapshot ready)
+                # 如果之前处于受限状态，尝试转存前先清理限制标志（如果还没过时间，但外部可能解除了）
+                if reason == "restricted":
+                    p115_service.clear_restriction()
+
+                logger.info(f"🎉 链接可以开始处理 (status: {status_info['share_state']}): {share_url}")
                 save_res = await p115_service.save_and_share(share_url, metadata=metadata)
                 
                 if save_res and save_res.get("status") == "success":
@@ -492,7 +516,8 @@ class TGService:
                         # Broadcast single successful link from poll
                         await self.broadcast_to_channels({share_url: share_link}, metadata)
                         
-                        success_text = f"✅ 审核已通过！链接处理完成。\n原链接: {share_url}\n新分享: {share_link}"
+                        # Use the title if available or a generic success msg
+                        success_text = f"✅ 处理完成！\n原链接: {share_url}\n新分享: {share_link}"
                         await message.reply(success_text)
                         
                         if settings.TG_USER_ID and str(message.chat.id) != str(settings.TG_USER_ID):
@@ -845,11 +870,16 @@ class TGService:
         from app.models.schema import PendingLink
         from sqlalchemy import select
         async with async_session() as session:
-            result = await session.execute(select(PendingLink).where(PendingLink.status == "auditing"))
+            result = await session.execute(select(PendingLink).where(PendingLink.status.in_(["auditing", "snapshotting", "restricted"])))
             tasks = result.scalars().all()
             if tasks:
                 for task in tasks:
-                    pending_info = {"share_url": task.share_url, "metadata": task.metadata_json, "db_id": task.id}
+                    pending_info = {
+                        "share_url": task.share_url, 
+                        "metadata": task.metadata_json, 
+                        "db_id": task.id,
+                        "reason": task.status
+                    }
                     asyncio.create_task(self._recovered_poll(pending_info))
 
     async def _recovered_poll(self, pending_info: dict):

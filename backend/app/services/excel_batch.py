@@ -300,6 +300,17 @@ class ExcelBatchService:
                                 continue
 
                         # Process the item
+                        if p115_service.is_restricted:
+                            logger.info(f"⏳ P115 服务当前处于受限状态，批量任务 {task.id} 暂停等待...")
+                            # 将 item 状态改回待处理，以便稍后重试
+                            async with async_session() as session:
+                                await session.execute(
+                                    update(ExcelTaskItem).where(ExcelTaskItem.id == item_id).values(status="待处理")
+                                )
+                                await session.commit()
+                            await asyncio.sleep(600)  # 等待 10 分钟再重看
+                            continue
+
                         await self._process_item(item_id)
                         
                     finally:
