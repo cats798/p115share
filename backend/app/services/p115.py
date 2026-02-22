@@ -20,6 +20,12 @@ API_MAX_RETRIES = 3
 # 重试间隔（秒）
 API_RETRY_DELAY = 5
 
+# iOS 用户代理
+IOS_UA = (
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5_1 like Mac OS X) "
+    "AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 115wangpan_ios/36.2.20"
+)
+
 
 class P115Service:
     def __init__(self):
@@ -64,6 +70,17 @@ class P115Service:
         if self._restriction_until > 0:
             self._restriction_until = 0
             logger.info("🔓 115 全局限制模式已解除")
+
+    def _get_ios_ua_kwargs(self):
+        """获取 iOS 用户代理相关的参数"""
+        return {
+            "headers": {
+                "user-agent": IOS_UA,
+                "accept-encoding": "gzip, deflate"
+            },
+            "app": "ios"
+        }
+
 
     async def _task_worker(self):
         """后台任务处理 Worker"""
@@ -189,7 +206,8 @@ class P115Service:
             # Simple API call to verify cookie
             resp = await self._api_call_with_timeout(
                 self.client.user_info, async_=True,
-                timeout=30, max_retries=2, label="user_info"
+                timeout=30, max_retries=2, label="user_info",
+                **self._get_ios_ua_kwargs()
             )
             if resp.get("state"):
                 self.is_connected = True
@@ -234,7 +252,7 @@ class P115Service:
                 logger.info(f"📁 调用 fs_makedirs_app 创建目录... (尝试 {attempt}/3)")
                 # Add 30s timeout to prevent indefinite hanging
                 resp = await asyncio.wait_for(
-                    self.client.fs_makedirs_app(path, pid=0, async_=True),
+                    self.client.fs_makedirs_app(path, pid=0, async_=True, **self._get_ios_ua_kwargs()),
                     timeout=30
                 )
                 logger.info(f"📋 fs_makedirs_app 响应: {resp}")
@@ -316,8 +334,9 @@ class P115Service:
             
             # 2. Get share snapshot to get file IDs and names (带超时重试)
             snap_resp = await self._api_call_with_timeout(
-                self.client.share_snap, payload, async_=True,
-                timeout=API_TIMEOUT, label="share_snap"
+                self.client.share_snap_app, payload, async_=True,
+                timeout=API_TIMEOUT, label="share_snap",
+                **self._get_ios_ua_kwargs()
             )
             check_response(snap_resp)
             logger.debug(f"📋 share_snap 响应数据: {snap_resp.get('data')}")
@@ -405,7 +424,10 @@ class P115Service:
                 if fid:
                     fids.append(str(fid))
                     # 115 share_snap returns names with unnecessary escapes sometimes (e.g. \' for ')
-                    raw_name = item.get("n", "未知")
+                    raw_name = item.get("n") or item.get("fn") or item.get("name") or item.get("file_name") or item.get("title")
+                    if not raw_name:
+                        logger.warning(f"⚠️ 无法从分享项提取文件名，可用的键有: {list(item.keys())}")
+                        raw_name = "未知"
                     cleaned_name = raw_name.replace("\\'", "'").replace('\\"', '"')
                     names.append(cleaned_name)
                 else:
@@ -458,7 +480,10 @@ class P115Service:
             # 4. Receive files
             # 💡 增加预检：在大文件保存前尝试清理
             # 提取分享的总大小用于精准容量判断
-            total_size = share_info.get("file_size", 0)
+            try:
+                total_size = int(share_info.get("file_size") or 0)
+            except (ValueError, TypeError):
+                total_size = 0
             await self.check_and_prepare_capacity(file_count=len(fids), total_size=total_size)
             # 重新获取最新的 CID，以防清理逻辑删除了目录并重建了它
             to_cid = await self._ensure_save_dir(target_dir)
@@ -472,8 +497,9 @@ class P115Service:
             
             try:
                 recv_resp = await self._api_call_with_timeout(
-                    self.client.share_receive, receive_payload, async_=True,
-                    timeout=API_TIMEOUT, label="share_receive"
+                    self.client.share_receive_app, receive_payload, async_=True,
+                    timeout=API_TIMEOUT, label="share_receive",
+                    **self._get_ios_ua_kwargs()
                 )
                 check_response(recv_resp)
                 logger.info(f"✅ 链接转存指令已发送: {share_url} -> CID {to_cid}")
@@ -624,7 +650,8 @@ class P115Service:
                 # 寻找对应的子 share_cid
                 child_share = next(s_cid for s_cid, info in share_structure.items() if info[0] == current_share and info[1] == name)
                 resp = await self._api_call_with_timeout(
-                    self.client.fs_makedirs_app, name, pid=current_real, async_=True
+                    self.client.fs_makedirs_app, name, pid=current_real, async_=True,
+                    **self._get_ios_ua_kwargs()
                 )
                 check_response(resp)
                 current_real = int(resp.get("cid") or resp.get("id") or (resp.get("data") or {}).get("cid") or 0)
@@ -651,7 +678,8 @@ class P115Service:
                 try:
                     resp = await self._api_call_with_timeout(
                         self.client.fs_makedirs_app, name, pid=current_target_pid, async_=True,
-                        label=f"fs_makedirs({name})"
+                        label=f"fs_makedirs({name})",
+                        **self._get_ios_ua_kwargs()
                     )
                     check_response(resp)
                     new_cid = int(resp.get("cid") or resp.get("id") or (resp.get("data") or {}).get("cid") or 0)
@@ -692,7 +720,10 @@ class P115Service:
                     # 注意：我们要找的是保存目录里的东西
                     try:
                         # 列出保存目录下的顶级文件/文件夹名
-                        ls_resp = await self._api_call_with_timeout(self.client.fs_files, save_dir_cid, async_=True)
+                        ls_resp = await self._api_call_with_timeout(
+                            self.client.fs_files_app2, save_dir_cid, async_=True,
+                            **self._get_ios_ua_kwargs()
+                        )
                         ls_items = ls_resp.get("data", [])
                         ls_names = [it["n"] for it in ls_items]
                         
@@ -723,8 +754,9 @@ class P115Service:
                         "cid": current_target_pid
                     }
                     recv_resp = await self._api_call_with_timeout(
-                        self.client.share_receive, receive_payload, async_=True,
-                        timeout=API_TIMEOUT, label=f"share_receive_batch({i//500})"
+                        self.client.share_receive_app, receive_payload, async_=True,
+                        timeout=API_TIMEOUT, label=f"share_receive_batch({i//500})",
+                        **self._get_ios_ua_kwargs()
                     )
                     check_response(recv_resp)
                     files_saved_total += len(batch)
@@ -753,8 +785,9 @@ class P115Service:
         try:
             payload = share_extract_payload(share_url)
             snap_resp = await self._api_call_with_timeout(
-                self.client.share_snap, payload, async_=True,
-                timeout=API_TIMEOUT, label="share_snap(status)"
+                self.client.share_snap_app, payload, async_=True,
+                timeout=API_TIMEOUT, label="share_snap(status)",
+                **self._get_ios_ua_kwargs()
             )
             check_response(snap_resp)
             
@@ -823,10 +856,11 @@ class P115Service:
         for name in target_names:
             try:
                 search_resp = await self._api_call_with_timeout(
-                    self.client.fs_search,
+                    self.client.fs_search_app2,
                     {"search_value": name, "cid": cid, "limit": 20},
                     async_=True,
-                    timeout=30, max_retries=2, label=f"fs_search({name})"
+                    timeout=30, max_retries=2, label=f"fs_search({name})",
+                    **self._get_ios_ua_kwargs()
                 )
                 check_response(search_resp)
                 search_data = search_resp.get("data", [])
@@ -840,7 +874,7 @@ class P115Service:
                 logger.debug(f"🔍 fs_search '{name}' 在 CID:{cid} 返回 {len(search_items)} 条结果")
                 
                 for item in search_items:
-                    item_name = item.get("n") or item.get("file_name")
+                    item_name = item.get("n") or item.get("fn") or item.get("name") or item.get("file_name") or item.get("title") or item.get("category_name")
                     if item_name == name:
                         item_id = item.get("fid") or item.get("cid") or item.get("file_id") or item.get("category_id")
                         if item_id:
@@ -865,10 +899,11 @@ class P115Service:
         
         try:
             resp = await self._api_call_with_timeout(
-                self.client.fs_files,
+                self.client.fs_files_app2,
                 {"cid": cid, "limit": 500, "show_dir": 1},
                 async_=True,
-                timeout=30, max_retries=2, label="fs_files"
+                timeout=30, max_retries=2, label="fs_files",
+                **self._get_ios_ua_kwargs()
             )
             check_response(resp)
             file_list = resp.get("data", [])
@@ -893,13 +928,13 @@ class P115Service:
             
             # 日志打印目录中的前10个文件名，便于排查
             if file_list:
-                dir_file_names = [item.get("n", "?") for item in file_list[:10]]
+                dir_file_names = [(item.get("n") or item.get("fn") or item.get("name") or item.get("file_name") or item.get("title") or item.get("category_name") or f"? (keys: {list(item.keys())})") for item in file_list[:10]]
                 logger.debug(f"📋 目录内文件(前10): {dir_file_names}")
             
             for item in file_list:
-                item_name = item.get("n")
+                item_name = item.get("n") or item.get("fn") or item.get("name") or item.get("file_name") or item.get("title") or item.get("category_name")
                 if item_name in remaining_names:
-                    item_id = item.get("fid") or item.get("cid")
+                    item_id = item.get("fid") or item.get("cid") or item.get("file_id") or item.get("category_id") or item.get("id")
                     if item_id:
                         matched.append({
                             "fid": str(item_id),
@@ -998,8 +1033,9 @@ class P115Service:
                     try:
                         logger.info(f"📤 正在创建分享链接 (分卷 {batch_idx}, 尝试 {retry_attempt}/{max_share_retries})...")
                         send_resp = await self._api_call_with_timeout(
-                            self.client.share_send, ",".join(batch_fids), async_=True,
-                            timeout=API_TIMEOUT, max_retries=1, label=f"share_send_batch_{batch_idx}"
+                            self.client.share_send_app, ",".join(batch_fids), async_=True,
+                            timeout=API_TIMEOUT, max_retries=1, label=f"share_send_batch_{batch_idx}",
+                            **self._get_ios_ua_kwargs()
                         )
                         check_response(send_resp)
                         
@@ -1025,8 +1061,9 @@ class P115Service:
                     try:
                         logger.info(f"🔄 正在将分享链接 {batch_share_code} 转换为长期有效...")
                         await self._api_call_with_timeout(
-                            self.client.share_update, {"share_code": batch_share_code, "share_duration": -1},
-                            async_=True, timeout=API_TIMEOUT, max_retries=2, label=f"share_update_{batch_idx}"
+                            self.client.share_update_app, {"share_code": batch_share_code, "share_duration": -1},
+                            async_=True, timeout=API_TIMEOUT, max_retries=2, label=f"share_update_{batch_idx}",
+                            **self._get_ios_ua_kwargs()
                         )
                     except Exception as e:
                         logger.warning(f"⚠️ 转换长期分享失败 (分卷 {batch_idx}): {e}")
@@ -1098,7 +1135,8 @@ class P115Service:
             
             resp = await self._api_call_with_timeout(
                 self.client.fs_delete, cid, async_=True,
-                timeout=API_TIMEOUT, label="fs_delete"
+                timeout=API_TIMEOUT, label="fs_delete",
+                **self._get_ios_ua_kwargs()
             )
             check_response(resp)
             
@@ -1116,7 +1154,8 @@ class P115Service:
         try:
             resp = await self._api_call_with_timeout(
                 self.client.user_space_info, async_=True,
-                timeout=API_TIMEOUT, label="user_space_info"
+                timeout=API_TIMEOUT, label="user_space_info",
+                **self._get_ios_ua_kwargs()
             )
             check_response(resp)
             data = resp.get("data", {})
@@ -1332,7 +1371,8 @@ class P115Service:
             
             resp = await self._api_call_with_timeout(
                 self.client.recyclebin_clean_app, payload, async_=True,
-                timeout=API_TIMEOUT, label="recyclebin_clean"
+                timeout=API_TIMEOUT, label="recyclebin_clean",
+                **self._get_ios_ua_kwargs()
             )
             check_response(resp)
             logger.info("✅ 回收站已清空")
