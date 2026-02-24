@@ -353,6 +353,11 @@ class P115Service:
 
             share_info = data.get("shareinfo" if "shareinfo" in data else "share_info", {})
             share_state = data.get("share_state", share_info.get("share_state", share_info.get("status"))) # Multiple fallbacks
+            if share_state is not None:
+                try:
+                    share_state = int(share_state)
+                except (ValueError, TypeError):
+                    pass
             share_title = share_info.get("share_title", "")
             have_vio_file = share_info.get("have_vio_file", 0)
             
@@ -794,6 +799,11 @@ class P115Service:
             data = snap_resp.get("data", {})
             share_info = data.get("shareinfo" if "shareinfo" in data else "share_info", {})
             share_state = data.get("share_state", share_info.get("share_state", share_info.get("status")))
+            if share_state is not None:
+                try:
+                    share_state = int(share_state)
+                except (ValueError, TypeError):
+                    pass
             share_title = share_info.get("share_title", "")
             have_vio_file = share_info.get("have_vio_file", 0)
             
