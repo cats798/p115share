@@ -293,6 +293,78 @@ class P115Service:
         # All retries exhausted — raise to prevent saving to root
         raise RuntimeError(f"无法确保保存目录 {path} 存在 (已重试3次): {last_error}")
 
+    async def _handle_already_received(self, to_cid: int, names: list[str], share_url: str, metadata: dict, have_vio_file: int, receive_payload: dict):
+        """处理文件已经接收的情况：先检查是否存在，如果不存在则在子目录重试转存"""
+        logger.warning(f"⚠️ 115 提示文件该分享已接收过: {share_url}")
+        # Verify if files really exist in to_cid
+        try:
+            # 用 _find_files_in_dir 查找（支持 search + list 双重查找）
+            found_files = await self._find_files_in_dir(to_cid, names)
+            found_count = len(found_files)
+            if found_count > 0:
+                logger.info(f"✅ 在保存目录中找到 {found_count} 个同名文件，继续处理")
+                return {
+                    "status": "success", 
+                    "to_cid": to_cid, 
+                    "names": names,
+                    "share_url": share_url,
+                    "recursive_links": [],
+                    "metadata": metadata or {},
+                    "have_vio": have_vio_file == 1
+                }
+            else:
+                logger.warning("⚠️ 115 提示已接收，但在保存目录未找到文件。尝试创建新目录重试转存...")
+                # 创建带时间戳的新目录
+                new_folder_name = f"Retry_{int(time.time())}"
+                resp = await self._api_call_with_timeout(
+                    self.client.fs_makedirs_app, new_folder_name, pid=to_cid, async_=True,
+                    **self._get_ios_ua_kwargs()
+                )
+                check_response(resp)
+                new_cid = int(resp.get("cid") or resp.get("id") or (resp.get("data") or {}).get("cid") or 0)
+                
+                if not new_cid:
+                    raise RuntimeError("创建重试目录失败，未获取到有效CID")
+                    
+                logger.info(f"📁 已创建重试目录: {new_folder_name} (CID: {new_cid})")
+                
+                # 修改 payload 的 cid 为新创建的目录并重试
+                retry_payload = receive_payload.copy()
+                retry_payload["cid"] = new_cid
+                
+                recv_resp = await self._api_call_with_timeout(
+                    self.client.share_receive_app, retry_payload, async_=True,
+                    timeout=API_TIMEOUT, label="share_receive_retry",
+                    **self._get_ios_ua_kwargs()
+                )
+                check_response(recv_resp)
+                logger.info(f"✅ 在新目录转存成功: {share_url} -> CID {new_cid}")
+                
+                return {
+                    "status": "success", 
+                    "to_cid": new_cid, 
+                    "names": names,
+                    "share_url": share_url,
+                    "recursive_links": [],
+                    "metadata": metadata or {},
+                    "have_vio": have_vio_file == 1
+                }
+                
+        except Exception as check_e:
+            logger.error(f"❌ 处理已接收逻辑(验证或重试转存)时出错: {check_e}")
+            if "4200045" in str(check_e) or "已经接收" in str(check_e):
+                return {
+                    "status": "error",
+                    "error_type": "already_exists_missing",
+                    "message": "该分享链接您已转存过。115 限制同一链接由于文件丢失而无法重复转存，重试转存也失败，请尝试寻找原文件或从回收站还原。"
+                }
+            # Assume failure to be safe
+            return {
+                "status": "error", 
+                "error_type": "unknown",
+                "message": f"保存失败，且重试转存报错: {str(check_e)}"
+            }
+
     async def save_share_link(self, share_url: str, metadata: dict = None, target_dir: Optional[str] = None):
         """通过队列保存链接"""
         return await self._enqueue_op("save_share", self._save_share_link_internal, share_url, metadata, target_dir)
@@ -520,31 +592,7 @@ class P115Service:
                     logger.info(f"✅ 递归分批保存指令已处理完毕: {share_url}")
                 # Check if it's a "file already received" error (errno 4200045)
                 elif "4200045" in str(recv_error) or "已经接收" in str(recv_error):
-                    logger.warning(f"⚠️ 115 提示文件该分享已接收过: {share_url}")
-                    # Verify if files really exist in to_cid
-                    found_all = False
-                    try:
-                        # 用 _find_files_in_dir 查找（支持 search + list 双重查找）
-                        found_files = await self._find_files_in_dir(to_cid, names)
-                        found_count = len(found_files)
-                        if found_count > 0:
-                            logger.info(f"✅ 在保存目录中找到 {found_count} 个同名文件，继续处理")
-                            # Continue to share creation with existing files
-                        else:
-                            logger.error("❌ 115 提示已接收，但在保存目录未找到文件（可能已被删除）。无法重新转存同一分享链接。")
-                            return {
-                                "status": "error",
-                                "error_type": "already_exists_missing",
-                                "message": "该分享链接您已转存过。115 限制同一链接无法由于文件丢失而重复转存，请尝试寻找原文件或从回收站还原。"
-                            }
-                    except Exception as check_e:
-                        logger.warning(f"⚠️ 检查文件是否存在时出错: {check_e}")
-                        # Assume failure to be safe
-                        return {
-                            "status": "error", 
-                            "error_type": "unknown",
-                            "message": "保存失败，且无法验证文件是否存在"
-                        }
+                    return await self._handle_already_received(to_cid, names, share_url, metadata, have_vio_file, receive_payload)
                 else:
                     # Other errors, re-raise
                     raise
@@ -610,6 +658,18 @@ class P115Service:
                     "metadata": metadata or {},
                     "db_id": db_id
                 }
+
+            # 检查是否为"已经接收"异常 (errno 4200045)
+            # 在某些情况下外层抛出的异常是纯文本，不包含在 errno 里
+            if "4200045" in error_msg or "已经接收" in error_msg:
+                # 重新构建 payload，这里可能外层没有 receive_payload，按现有信息构建
+                retry_payload = {
+                    "share_code": payload["share_code"],
+                    "receive_code": payload["receive_code"] or "",
+                    "file_id": ",".join(fids) if 'fids' in locals() else "",
+                    "cid": to_cid
+                }
+                return await self._handle_already_received(to_cid, names, share_url, metadata, have_vio_file, retry_payload)
 
             logger.error("❌ 保存分享链接发生程序异常: {}", error_msg)
             return {
