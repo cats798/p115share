@@ -352,7 +352,14 @@ class P115Service:
                 
         except Exception as check_e:
             logger.error(f"❌ 处理已接收逻辑(验证或重试转存)时出错: {check_e}")
-            if "4200045" in str(check_e) or "已经接收" in str(check_e):
+            
+            # 尝试提取 errno
+            errno_val = getattr(check_e, "errno", None)
+            if hasattr(check_e, 'args') and len(check_e.args) >= 2 and isinstance(check_e.args[1], dict):
+                if not errno_val:
+                    errno_val = check_e.args[1].get("errno")
+                    
+            if errno_val == 4200045 or "4200045" in str(check_e) or "已经接收" in str(check_e) or "已接收" in str(check_e):
                 return {
                     "status": "error",
                     "error_type": "already_exists_missing",
@@ -591,7 +598,7 @@ class P115Service:
                     recursive_links = await self._save_share_recursive(share_url, to_cid)
                     logger.info(f"✅ 递归分批保存指令已处理完毕: {share_url}")
                 # Check if it's a "file already received" error (errno 4200045)
-                elif "4200045" in str(recv_error) or "已经接收" in str(recv_error):
+                elif errno_val == 4200045 or "4200045" in str(recv_error) or "已经接收" in str(recv_error) or "已接收" in str(recv_error):
                     return await self._handle_already_received(to_cid, names, share_url, metadata, have_vio_file, receive_payload)
                 else:
                     # Other errors, re-raise
@@ -609,12 +616,16 @@ class P115Service:
         except Exception as e:
             # 彻底避免 loguru 格式化异常时可能触发的 KeyError
             try:
+                errno_val = getattr(e, "errno", None)
                 if hasattr(e, 'args') and len(e.args) >= 2 and isinstance(e.args[1], dict):
                     error_msg = str(e.args[1].get('error', e))
+                    if not errno_val:
+                        errno_val = e.args[1].get('errno')
                 else:
                     error_msg = str(e)
             except:
                 error_msg = "未知异常"
+                errno_val = None
             
             if "正在生成文件快照" in error_msg:
                 logger.info(f"🔍 分享链接正在生成快照，进入轮询等待队列: {share_url}")
@@ -661,7 +672,7 @@ class P115Service:
 
             # 检查是否为"已经接收"异常 (errno 4200045)
             # 在某些情况下外层抛出的异常是纯文本，不包含在 errno 里
-            if "4200045" in error_msg or "已经接收" in error_msg:
+            if errno_val == 4200045 or "4200045" in error_msg or "已经接收" in error_msg or "已接收" in error_msg:
                 # 重新构建 payload，这里可能外层没有 receive_payload，按现有信息构建
                 retry_payload = {
                     "share_code": payload["share_code"],
@@ -829,7 +840,13 @@ class P115Service:
                     
                     await asyncio.sleep(random.randint(2, 3))
                 except Exception as e:
-                    if "4200045" in str(e) or "已经接收" in str(e):
+                    # 尝试提取 errno
+                    errno_val = getattr(e, "errno", None)
+                    if hasattr(e, 'args') and len(e.args) >= 2 and isinstance(e.args[1], dict):
+                        if not errno_val:
+                            errno_val = e.args[1].get("errno")
+                            
+                    if errno_val == 4200045 or "4200045" in str(e) or "已经接收" in str(e) or "已接收" in str(e):
                         continue
                     logger.error(f"❌ 递归转存文件包失败: {e}")
         
