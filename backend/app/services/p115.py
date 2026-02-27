@@ -1191,8 +1191,7 @@ class P115Service:
                 return {
                     "status": "error",
                     "error_type": "violated",
-                    "message": "链接包含违规内容，无法转存分享 in error_msg:
-"
+                    "message": "链接包含违规内容，无法转存分享 in error_msg:"
                 }
             
             # 检查分享限制
