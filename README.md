@@ -42,7 +42,7 @@ docker run -d \
   -p 8000:8000 \
   -e TZ=Asia/Shanghai \
   -v $(pwd)/data:/app/data \
-  --restart unless-stopped \
+  --restart p115share \
   cats798/p115share:latest
 ```
 
@@ -65,7 +65,7 @@ services:
       - ./data:/app/data
     environment:
       - TZ=Asia/Shanghai
-    restart: unless-stopped
+    restart: p115share
 ```
 
 然后启动服务：
