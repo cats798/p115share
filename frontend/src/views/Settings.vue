@@ -11,6 +11,7 @@
       <a-typography-title :level="5" style="margin-bottom: 24px">系统配置</a-typography-title>
       
       <a-collapse ghost default-active-key="tg">
+        <!-- Telegram 配置面板 -->
         <a-collapse-panel key="tg" header="Telegram 配置">
           <a-form-item label="Bot Token" name="tg_bot_token">
             <a-input-password v-model:value="formState.tg_bot_token" placeholder="请输入 TG Bot Token" />
@@ -65,6 +66,7 @@
           <a-button type="primary" @click="onFinish('tg')" :loading="loading" block>保存 Telegram 配置</a-button>
         </a-collapse-panel>
 
+        <!-- 115 网盘配置面板 -->
         <a-collapse-panel key="p115" header="115 网盘配置">
           <a-form-item label="Cookie" name="p115_cookie">
             <a-textarea v-model:value="formState.p115_cookie" :rows="4" placeholder="请输入 115 Cookie" />
@@ -116,6 +118,7 @@
           <a-button type="primary" @click="onFinish('p115')" :loading="loading" block>保存 115 配置</a-button>
         </a-collapse-panel>
 
+        <!-- 代理配置面板 -->
         <a-collapse-panel key="proxy" header="代理配置">
           <a-form-item label="启用代理" style="margin-bottom: 16px">
             <a-switch v-model:checked="formState.proxy_enabled" />
@@ -174,6 +177,29 @@
           <a-divider />
           <a-button type="primary" @click="onFinish('proxy')" :loading="loading" block>保存代理配置</a-button>
         </a-collapse-panel>
+
+        <!-- TMDB 整理配置面板（新增） -->
+        <a-collapse-panel key="tmdb" header="TMDB 整理配置">
+          <a-form-item label="TMDB API Key">
+            <a-input-password v-model:value="formState.tmdb_api_key" placeholder="输入 TMDB API Key" />
+          </a-form-item>
+          <a-form-item label="整理规则配置">
+            <a-textarea v-model:value="formState.tmdb_config" :rows="10" placeholder='{"tmdbDirectoryConfig": {...}}' />
+            <div style="font-size: 12px; color: #999; margin-top: 4px">
+              上传 JSON 配置文件或手动编辑
+            </div>
+            <a-upload
+              name="file"
+              :show-upload-list="false"
+              :before-upload="uploadTmdbConfig"
+              accept=".json"
+            >
+              <a-button>上传配置文件</a-button>
+            </a-upload>
+          </a-form-item>
+          <a-divider />
+          <a-button type="primary" @click="onFinish('tmdb')" :loading="loading">保存 TMDB 配置</a-button>
+        </a-collapse-panel>
       </a-collapse>
     </a-form>
   </div>
@@ -217,7 +243,9 @@ const formState = reactive({
   proxy_type: 'HTTP',
   p115_cleanup_capacity_enabled: false,
   p115_cleanup_capacity_limit: 0,
-  p115_cleanup_capacity_unit: 'GB'
+  p115_cleanup_capacity_unit: 'GB',
+  tmdb_api_key: '',
+  tmdb_config: '',
 });
 
 const addChannel = () => {
@@ -301,12 +329,14 @@ const loadConfig = async () => {
     formState.p115_cleanup_capacity_enabled = res.data.p115_cleanup_capacity_enabled || false;
     formState.p115_cleanup_capacity_limit = res.data.p115_cleanup_capacity_limit || 1;
     formState.p115_cleanup_capacity_unit = 'TB'; // Support TB only
+    formState.tmdb_api_key = res.data.tmdb_api_key || '';
+    formState.tmdb_config = res.data.tmdb_config || '';
   } catch (e) {
     console.error(e);
   }
 };
 
-const onFinish = async (section: 'tg' | 'p115' | 'proxy' = 'tg') => {
+const onFinish = async (section: 'tg' | 'p115' | 'proxy' | 'tmdb' = 'tg') => {
   try {
     const sectionFields: Record<string, string[]> = {
       tg: ['tg_bot_token', 'tg_user_id', 'tg_allow_chats'],
@@ -315,7 +345,8 @@ const onFinish = async (section: 'tg' | 'p115' | 'proxy' = 'tg') => {
         'p115_cleanup_trash_cron', 'p115_recycle_password',
         'p115_cleanup_capacity_enabled', 'p115_cleanup_capacity_limit', 'p115_cleanup_capacity_unit'
       ],
-      proxy: ['proxy_enabled', 'proxy_host', 'proxy_port', 'proxy_user', 'proxy_pass', 'proxy_type']
+      proxy: ['proxy_enabled', 'proxy_host', 'proxy_port', 'proxy_user', 'proxy_pass', 'proxy_type'],
+      tmdb: ['tmdb_api_key', 'tmdb_config']
     };
 
     await formRef.value.validate(sectionFields[section]!);
@@ -344,7 +375,10 @@ const onFinish = async (section: 'tg' | 'p115' | 'proxy' = 'tg') => {
     }
 
     const res = await axios.post('/api/config/update', payload);
-    message.success(section === 'tg' ? 'Telegram 配置已保存' : section === 'p115' ? '115 网盘配置已保存' : '代理配置已保存');
+    message.success(section === 'tg' ? 'Telegram 配置已保存' : 
+                    section === 'p115' ? '115 网盘配置已保存' : 
+                    section === 'proxy' ? '代理配置已保存' : 
+                    'TMDB 配置已保存');
     if (res.data.bot_restarted) {
       message.info('机器人已根据新配置安全重启');
     }
@@ -420,6 +454,17 @@ const detectProtocol = async () => {
   } finally {
     detecting.value = false;
   }
+};
+
+// 新增：上传 TMDB 配置文件
+const uploadTmdbConfig = (file: File) => {
+  const reader = new FileReader();
+  reader.onload = (e) => {
+    formState.tmdb_config = e.target?.result as string;
+    message.success('配置文件已加载');
+  };
+  reader.readAsText(file);
+  return false; // 阻止自动上传
 };
 
 onMounted(loadConfig);
