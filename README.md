@@ -43,7 +43,7 @@ docker run -d \
   -e TZ=Asia/Shanghai \
   -v $(pwd)/data:/app/data \
   --restart unless-stopped \
-  listeningltg/p115-share:latest
+  cats798/p115share:latest
 ```
 
 > **说明**：`data` 目录用于持久化数据库文件（包括用户头像 base64 数据）
@@ -56,9 +56,9 @@ docker run -d \
 version: '3.8'
 
 services:
-  p115-share:
-    image: listeningltg/p115-share:latest
-    container_name: p115-share
+  p115share:
+    image: cats798/p115share:latest
+    container_name: p115share
     ports:
       - "8000:8000"
     volumes:
