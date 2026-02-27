@@ -30,7 +30,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: cats798/p115share:latest
+          images: cats798/p115share
           tags: |
             type=semver,pattern={{version}}
             type=raw,value=latest,enable=true
