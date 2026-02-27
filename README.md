@@ -58,7 +58,7 @@ version: '3.8'
 services:
   p115share:
     image: cats798/p115share:latest
-    container_name: p115share
+    container_name: p115-share
     ports:
       - "8000:8000"
     volumes:
