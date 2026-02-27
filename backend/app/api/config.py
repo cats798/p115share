@@ -33,6 +33,8 @@ class ConfigUpdate(BaseModel):
     p115_cleanup_capacity_enabled: Optional[bool] = None
     p115_cleanup_capacity_limit: Optional[float] = None
     p115_cleanup_capacity_unit: Optional[str] = None
+    tmdb_api_key: Optional[str] = None
+    tmdb_config: Optional[str] = None
 
     @field_validator('p115_cleanup_dir_cron', 'p115_cleanup_trash_cron')
     @classmethod
@@ -106,7 +108,6 @@ async def update_config(cfg: ConfigUpdate, user=Depends(get_current_user)):
             need_restart_bot = True
     
     # 4. Update Cron tasks
-    # 4. Update Cron tasks
     if "p115_cleanup_dir_cron" in update_data and settings.P115_CLEANUP_DIR_CRON != cfg.p115_cleanup_dir_cron:
         await settings.save_setting("P115_CLEANUP_DIR_CRON", cfg.p115_cleanup_dir_cron)
         from app.services.scheduler import cleanup_scheduler
@@ -137,7 +138,13 @@ async def update_config(cfg: ConfigUpdate, user=Depends(get_current_user)):
         from app.services.scheduler import cleanup_scheduler
         cleanup_scheduler.update_cleanup_capacity_job()
     
-    # 5. Unified restart bot polling
+    # 5. TMDB settings
+    if "tmdb_api_key" in update_data:
+        await settings.save_setting("TMDB_API_KEY", cfg.tmdb_api_key)
+    if "tmdb_config" in update_data:
+        await settings.save_setting("TMDB_CONFIG", cfg.tmdb_config)
+    
+    # 6. Unified restart bot polling
     if need_restart_bot:
         asyncio.create_task(tg_service.restart_polling())
         logger.info("🔄 正在触发机器人安全重启任务...")
@@ -168,6 +175,8 @@ async def get_config(user=Depends(get_current_user)):
         "p115_cleanup_capacity_enabled": settings.P115_CLEANUP_CAPACITY_ENABLED,
         "p115_cleanup_capacity_limit": settings.P115_CLEANUP_CAPACITY_LIMIT,
         "p115_cleanup_capacity_unit": settings.P115_CLEANUP_CAPACITY_UNIT,
+        "tmdb_api_key": settings.TMDB_API_KEY,
+        "tmdb_config": settings.TMDB_CONFIG,
         "version": VERSION
     }
 
@@ -315,3 +324,21 @@ async def clear_history(user=Depends(get_current_user)):
     else:
         from fastapi import HTTPException
         raise HTTPException(status_code=500, detail="清空历史记录失败")
+
+# 新增 TMDB 测试接口
+@router.post("/test-tmdb")
+async def test_tmdb(cfg: ConfigUpdate, user=Depends(get_current_user)):
+    from app.services.tmdb import TMDBClient
+    if not cfg.tmdb_api_key:
+        return {"status": "error", "message": "API Key 不能为空"}
+    client = TMDBClient(cfg.tmdb_api_key)
+    try:
+        result = await client.search_multi("test")
+        if result is not None:
+            return {"status": "success", "message": "连接成功"}
+        else:
+            return {"status": "error", "message": "连接失败，请检查 API Key"}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+    finally:
+        await client.close()
