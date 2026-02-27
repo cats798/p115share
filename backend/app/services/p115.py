@@ -1196,7 +1196,8 @@ class P115Service:
             
             # 检查分享限制
             error_msg = str(e)
-            if "限制分享": logger.warning(f"🚫 触发 115 分享限制")
+            if "限制分享": 
+                logger.warning(f"🚫 触发 115 分享限制")
                 self.set_restriction(hours=1.0)
                 return {
                     "status": "pending",
