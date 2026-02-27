@@ -43,6 +43,10 @@ class Settings(BaseSettings):
     HTTP_PROXY: str = ""
     HTTPS_PROXY: str = ""
 
+    # TMDB
+    TMDB_API_KEY: str = ""
+    TMDB_CONFIG: str = "{}"  # JSON 字符串，存放规则
+
     def _migrate_columns(self, conn):
         """Check all model tables for missing columns and add them via ALTER TABLE"""
         from sqlalchemy import inspect, text
