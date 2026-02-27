@@ -12,6 +12,7 @@ from typing import Literal, Optional, Tuple, Union
 from app.core.database import async_session
 from app.models.schema import PendingLink, LinkHistory
 from sqlalchemy import select, delete
+from app.services.tmdb import TMDBClient, MediaOrganizer  # 新增
 
 # 默认 API 请求超时（秒）
 API_TIMEOUT = 60
@@ -381,6 +382,9 @@ class P115Service:
         async def _internal_flow():
             save_res = await self._save_share_link_internal(share_url, metadata, target_dir)
             if save_res and save_res.get("status") == "success":
+                # 整理文件
+                if metadata:
+                    save_res = await self._organize_files(save_res, metadata)
                 share_res = await self.create_share_link(save_res)
                 if isinstance(share_res, str):
                     return {"status": "success", "share_link": share_res}
@@ -1187,13 +1191,13 @@ class P115Service:
                 return {
                     "status": "error",
                     "error_type": "violated",
-                    "message": "链接包含违规内容，无法转存分享"
+                    "message": "链接包含违规内容，无法转存分享 in error_msg:
+"
                 }
             
             # 检查分享限制
             error_msg = str(e)
-            if "限制分享" in error_msg:
-                logger.warning(f"🚫 触发 115 分享限制")
+            if "限制分享"                logger.warning(f"🚫 触发 115 分享限制")
                 self.set_restriction(hours=1.0)
                 return {
                     "status": "pending",
@@ -1468,5 +1472,93 @@ class P115Service:
             logger.error("❌ 内部清空回收站失败: {}", e)
             return False
 
+    # ========== 新增整理方法 ==========
+    async def _organize_files(self, save_result: dict, metadata: dict) -> dict:
+        """整理文件：识别媒体、移动目录、重命名"""
+        if not settings.TMDB_API_KEY:
+            return save_result  # 未配置 API Key，跳过
+
+        title_raw = metadata.get('description') or metadata.get('full_text') or ''
+        # 从 metadata 中提取标题（优先使用 item.title 或消息中的 bold 部分）
+        # 简单处理：假设 metadata 中已有 'title' 字段
+        title_str = metadata.get('title') or title_raw
+        if not title_str:
+            return save_result
+
+        organizer = MediaOrganizer(settings.TMDB_CONFIG)
+        clean_title, year = organizer.parse_title_year(title_str)
+
+        tmdb = TMDBClient()
+        try:
+            media_info = await tmdb.search_multi(clean_title, year)
+            if not media_info:
+                logger.info(f"TMDB 未识别到媒体: {clean_title}")
+                return save_result
+
+            # 获取详细信息（如果需要国家/体裁更精确匹配）
+            media_type = media_info.get('media_type')
+            if media_type in ['movie', 'tv']:
+                details = await tmdb.get_details(media_type, media_info['id'])
+                if details:
+                    media_info.update(details)
+
+            rule = organizer.match_rule(media_info)
+            if not rule:
+                logger.info(f"未匹配到规则: {clean_title}")
+                return save_result
+
+            # 确定目标目录
+            target_path = organizer.get_target_path(rule)
+            target_cid = await self._ensure_save_dir(target_path)  # 确保目录存在
+
+            # 生成新名称
+            new_name = organizer.generate_new_name(rule, media_info)
+
+            # 移动文件/文件夹
+            to_cid = save_result.get('to_cid')
+            names = save_result.get('names', [])
+            if len(names) == 1:
+                # 单文件/文件夹
+                old_fid = await self._find_single_fid(to_cid, names[0])
+                if old_fid:
+                    # 重命名（使用 fs_rename，它允许同时移动）
+                    try:
+                        await self._api_call_with_timeout(
+                            self.client.fs_rename,
+                            old_fid, new_name, pid=target_cid,
+                            async_=True, **self._get_ios_ua_kwargs()
+                        )
+                        logger.info(f"已移动并重命名 {names[0]} -> {target_path}/{new_name}")
+                        # 更新 save_result
+                        save_result['to_cid'] = target_cid
+                        save_result['names'] = [new_name]
+                    except Exception as e:
+                        logger.error(f"移动/重命名失败: {e}")
+                else:
+                    logger.warning(f"未找到文件 {names[0]} 进行整理")
+            else:
+                # 多个文件/文件夹，目前仅支持移动到目录并保持原名（或批量重命名？）
+                # 简单处理：将整个目录（如果是一个文件夹）移动，或者分别移动文件
+                # 这里先简化：假设所有文件都在同一目录下，我们只移动目录本身
+                if save_result.get('is_folder'):
+                    # 如果 save_result 包含文件夹信息，则移动文件夹
+                    # 但当前 save_result 没有 is_folder 标志，需要扩展
+                    pass
+                # 暂不处理多文件，记录警告
+                logger.warning("多文件整理暂未实现，跳过")
+
+            return save_result
+        except Exception as e:
+            logger.error(f"整理过程出错: {e}")
+            return save_result
+        finally:
+            await tmdb.close()
+
+    async def _find_single_fid(self, cid: int, name: str) -> Optional[str]:
+        """在指定目录中查找单个文件/文件夹的 ID"""
+        files = await self._find_files_in_dir(cid, [name])
+        if files:
+            return files[0]['fid']
+        return None
     
 p115_service = P115Service()
