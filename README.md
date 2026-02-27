@@ -79,8 +79,8 @@ docker compose up -d
 如果您想从源码构建：
 
 ```bash
-git clone https://github.com/ListeningLTG/P115-Share.git
-cd P115-Share
+git clone https://github.com/cats798/P115Share.git
+cd P115Share
 docker compose up -d --build
 ```
 
