@@ -1386,153 +1386,163 @@ class P115Service:
 
     # ========== 整理方法 ==========
     async def _organize_files(self, save_result: dict, metadata: dict) -> dict:
-    """整理文件：识别媒体、移动目录、重命名
-       使用转存后的文件/文件夹名作为标题来源
-       严格匹配流程：
-       1. 从文件名提取 TMDB ID、年份、干净标题
-       2. 优先用 ID 查询，并验证年份
-       3. 如果 ID 不存在或年份不匹配，用标题搜索并验证年份
-    """
-    if not settings.TMDB_API_KEY:
-        logger.debug("TMDB API Key 未配置，跳过整理")
-        return save_result
+        """整理文件：识别媒体、移动目录、重命名
+           使用转存后的文件/文件夹名作为标题来源
+           严格匹配流程：
+           1. 从文件名提取 TMDB ID、年份、干净标题
+           2. 优先用 ID 查询，并验证年份
+           3. 如果 ID 不存在或年份不匹配，用标题搜索并验证年份
+        """
+        if not settings.TMDB_API_KEY:
+            logger.debug("TMDB API Key 未配置，跳过整理")
+            return save_result
 
-    # 直接从 save_result 获取转存后的文件/文件夹名
-    if not save_result.get('names'):
-        logger.debug("save_result 中无文件名信息，跳过整理")
-        return save_result
+        # 直接从 save_result 获取转存后的文件/文件夹名
+        if not save_result.get('names'):
+            logger.debug("save_result 中无文件名信息，跳过整理")
+            return save_result
 
-    title_candidate = save_result['names'][0]
-    logger.info(f"使用转存后的文件/文件夹名作为标题: {title_candidate}")
+        title_candidate = save_result['names'][0]
+        logger.info(f"使用转存后的文件/文件夹名作为标题: {title_candidate}")
 
-    organizer = MediaOrganizer(settings.TMDB_CONFIG)
-    tmdb = TMDBClient()
-    try:
-        # 1. 从文件名中提取 TMDB ID、年份和干净标题
-        tmdb_id = organizer.extract_tmdb_id(title_candidate)
-        year = organizer.extract_year(title_candidate)
-        clean_title = organizer.clean_title(title_candidate)
-        
-        logger.info(f"提取信息 - 标题: {clean_title}, 年份: {year}, TMDB ID: {tmdb_id}")
-        
-        media_info = None
-        match_method = None
+        organizer = MediaOrganizer(settings.TMDB_CONFIG)
+        tmdb = TMDBClient()
+        try:
+            # 1. 从文件名中提取 TMDB ID、年份和干净标题
+            tmdb_id = organizer.extract_tmdb_id(title_candidate)
+            year = organizer.extract_year(title_candidate)
+            clean_title = organizer.clean_title(title_candidate)
+            
+            logger.info(f"提取信息 - 标题: {clean_title}, 年份: {year}, TMDB ID: {tmdb_id}")
+            
+            media_info = None
+            match_method = None
 
-        # 2. 优先使用 ID 查询
-        if tmdb_id:
-            for mtype in ['movie', 'tv']:
-                media_info = await tmdb.get_details(mtype, tmdb_id)
+            # 2. 优先使用 ID 查询
+            if tmdb_id:
+                for mtype in ['movie', 'tv']:
+                    media_info = await tmdb.get_details(mtype, tmdb_id)
+                    if media_info:
+                        media_info['media_type'] = mtype
+                        
+                        # 获取媒体的年份
+                        media_year = None
+                        if mtype == 'movie':
+                            release = media_info.get('release_date')
+                            if release:
+                                media_year = int(release[:4])
+                        else:
+                            first_air = media_info.get('first_air_date')
+                            if first_air:
+                                media_year = int(first_air[:4])
+                        
+                        # 验证年份（如果提供了年份）
+                        if year and media_year and year != media_year:
+                            logger.warning(f"ID {tmdb_id} 年份不匹配: 期望 {year}, 实际 {media_year}，放弃此结果")
+                            media_info = None
+                            continue
+                        
+                        logger.info(f"通过 ID {tmdb_id} 找到媒体: {media_info.get('title') or media_info.get('name')} (年份: {media_year})")
+                        match_method = "id"
+                        break
+                
+                if not media_info:
+                    logger.info(f"通过 ID {tmdb_id} 未找到有效媒体，回退到标题搜索")
+
+            # 3. 如果未通过 ID 找到，使用标题搜索
+            if not media_info:
+                search_title = clean_title if clean_title else title_candidate
+                logger.info(f"使用标题搜索: {search_title}")
+                media_info = await tmdb.search_multi(search_title, year)
+                
                 if media_info:
-                    media_info['media_type'] = mtype
+                    # 验证搜索结果是否与提取的年份匹配
+                    result_id = media_info.get('id')
+                    result_year = None
+                    mtype = media_info.get('media_type')
                     
-                    # 获取媒体的年份
-                    media_year = None
                     if mtype == 'movie':
                         release = media_info.get('release_date')
                         if release:
-                            media_year = int(release[:4])
+                            result_year = int(release[:4])
                     else:
                         first_air = media_info.get('first_air_date')
                         if first_air:
-                            media_year = int(first_air[:4])
+                            result_year = int(first_air[:4])
                     
-                    # 验证年份（如果提供了年份）
-                    if year and media_year and year != media_year:
-                        logger.warning(f"ID {tmdb_id} 年份不匹配: 期望 {year}, 实际 {media_year}，放弃此结果")
+                    # 年份验证（如果提供了年份）
+                    if year and result_year and year != result_year:
+                        logger.warning(f"标题搜索到的媒体年份 {result_year} 与提取的年份 {year} 不一致，放弃此结果")
                         media_info = None
-                        continue
-                    
-                    logger.info(f"通过 ID {tmdb_id} 找到媒体: {media_info.get('title') or media_info.get('name')} (年份: {media_year})")
-                    match_method = "id"
-                    break
-            
-            if not media_info:
-                logger.info(f"通过 ID {tmdb_id} 未找到有效媒体，回退到标题搜索")
-
-        # 3. 如果未通过 ID 找到，使用标题搜索
-        if not media_info:
-            search_title = clean_title if clean_title else title_candidate
-            logger.info(f"使用标题搜索: {search_title}")
-            media_info = await tmdb.search_multi(search_title, year)
-            
-            if media_info:
-                # 验证搜索结果是否与提取的年份匹配
-                result_id = media_info.get('id')
-                result_year = None
-                mtype = media_info.get('media_type')
-                
-                if mtype == 'movie':
-                    release = media_info.get('release_date')
-                    if release:
-                        result_year = int(release[:4])
-                else:
-                    first_air = media_info.get('first_air_date')
-                    if first_air:
-                        result_year = int(first_air[:4])
-                
-                # 年份验证（如果提供了年份）
-                if year and result_year and year != result_year:
-                    logger.warning(f"标题搜索到的媒体年份 {result_year} 与提取的年份 {year} 不一致，放弃此结果")
-                    media_info = None
-                else:
-                    logger.info(f"通过标题搜索找到媒体: {clean_title} (ID: {result_id}, 年份: {result_year})")
-                    match_method = "title"
-
-        if not media_info:
-            logger.info(f"TMDB 未识别到媒体: {title_candidate[:50]}")
-            return save_result
-
-        # 4. 获取详细信息（如果需要）
-        media_type = media_info.get('media_type')
-        if media_type in ['movie', 'tv'] and 'genres' not in media_info:
-            details = await tmdb.get_details(media_type, media_info['id'])
-            if details:
-                media_info.update(details)
-
-        # 5. 匹配规则
-        rule = organizer.match_rule(media_info)
-        if not rule:
-            logger.info(f"未匹配到规则: {clean_title}")
-            return save_result
-
-        # 6. 确定目标目录
-        target_path = organizer.get_target_path(rule)
-        target_cid = await self._ensure_save_dir(target_path)
-
-        # 7. 生成新名称
-        new_name = organizer.generate_new_name(rule, media_info)
-
-        # 8. 移动/重命名
-        to_cid = save_result.get('to_cid')
-        names = save_result.get('names', [])
-        if len(names) == 1:
-            old_fid = await self._find_single_fid(to_cid, names[0])
-            if old_fid:
-                try:
-                    # 调用 fs_rename，注意处理返回值
-                    resp = await self._api_call_with_timeout(
-                        self.client.fs_rename,
-                        old_fid, new_name, pid=target_cid,
-                        async_=True, **self._get_ios_ua_kwargs()
-                    )
-                    # 检查响应是否成功（根据 p115client 的实际返回格式调整）
-                    if isinstance(resp, dict) and resp.get('state'):
-                        logger.info(f"✅ 已移动并重命名 {names[0]} -> {target_path}/{new_name}")
-                        # 更新 save_result，以便后续分享链接使用新位置和新名称
-                        save_result['to_cid'] = target_cid
-                        save_result['names'] = [new_name]
                     else:
-                        logger.error(f"❌ 移动/重命名失败，响应: {resp}")
-                except Exception as e:
-                    logger.error(f"❌ 移动/重命名失败: {e}")
-            else:
-                logger.warning(f"⚠️ 未找到文件 {names[0]} 进行整理")
-        else:
-            logger.warning("多文件整理暂未实现，跳过")
+                        logger.info(f"通过标题搜索找到媒体: {clean_title} (ID: {result_id}, 年份: {result_year})")
+                        match_method = "title"
 
-        return save_result
-    except Exception as e:
-        logger.error(f"整理过程出错: {e}")
-        return save_result
-    finally:
-        await tmdb.close()
+            if not media_info:
+                logger.info(f"TMDB 未识别到媒体: {title_candidate[:50]}")
+                return save_result
+
+            # 4. 获取详细信息（如果需要）
+            media_type = media_info.get('media_type')
+            if media_type in ['movie', 'tv'] and 'genres' not in media_info:
+                details = await tmdb.get_details(media_type, media_info['id'])
+                if details:
+                    media_info.update(details)
+
+            # 5. 匹配规则
+            rule = organizer.match_rule(media_info)
+            if not rule:
+                logger.info(f"未匹配到规则: {clean_title}")
+                return save_result
+
+            # 6. 确定目标目录
+            target_path = organizer.get_target_path(rule)
+            target_cid = await self._ensure_save_dir(target_path)
+
+            # 7. 生成新名称
+            new_name = organizer.generate_new_name(rule, media_info)
+
+            # 8. 移动/重命名
+            to_cid = save_result.get('to_cid')
+            names = save_result.get('names', [])
+            if len(names) == 1:
+                old_fid = await self._find_single_fid(to_cid, names[0])
+                if old_fid:
+                    try:
+                        # 调用 fs_rename，注意处理返回值
+                        resp = await self._api_call_with_timeout(
+                            self.client.fs_rename,
+                            old_fid, new_name, pid=target_cid,
+                            async_=True, **self._get_ios_ua_kwargs()
+                        )
+                        # 检查响应是否成功（根据 p115client 的实际返回格式调整）
+                        if isinstance(resp, dict) and resp.get('state'):
+                            logger.info(f"✅ 已移动并重命名 {names[0]} -> {target_path}/{new_name}")
+                            # 更新 save_result，以便后续分享链接使用新位置和新名称
+                            save_result['to_cid'] = target_cid
+                            save_result['names'] = [new_name]
+                        else:
+                            logger.error(f"❌ 移动/重命名失败，响应: {resp}")
+                    except Exception as e:
+                        logger.error(f"❌ 移动/重命名失败: {e}")
+                else:
+                    logger.warning(f"⚠️ 未找到文件 {names[0]} 进行整理")
+            else:
+                logger.warning("多文件整理暂未实现，跳过")
+
+            return save_result
+        except Exception as e:
+            logger.error(f"整理过程出错: {e}")
+            return save_result
+        finally:
+            await tmdb.close()
+
+    async def _find_single_fid(self, cid: int, name: str) -> Optional[str]:
+        """在指定目录中查找单个文件/文件夹的 ID"""
+        files = await self._find_files_in_dir(cid, [name])
+        if files:
+            return files[0]['fid']
+        return None
+
+    
+p115_service = P115Service()
