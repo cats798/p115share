@@ -1,5 +1,3 @@
-# app/services/tmdb.py (完整文件，包含所有最新修改)
-
 import aiohttp
 import json
 import re
@@ -98,12 +96,13 @@ class MediaOrganizer:
                 logger.error(f"Failed to load TMDB config: {e}")
 
     def extract_tmdb_id(self, text: str) -> Optional[int]:
-        """从文本中提取 TMDB ID，支持格式：tmdb-12345, {tmdb-12345}, [tmdbid=12345]"""
+        """从文本中提取 TMDB ID，支持格式：tmdb-12345, {tmdb-12345}, [tmdbid=12345], tmdb=12345"""
         patterns = [
             r'tmdb[-\s]?(\d+)',
             r'\{tmdb-(\d+)\}',
             r'\[tmdbid=(\d+)\]',
             r'tmdbid[:\s]?(\d+)',
+            r'tmdb=(\d+)',
         ]
         for pat in patterns:
             match = re.search(pat, text, re.IGNORECASE)
@@ -111,35 +110,41 @@ class MediaOrganizer:
                 return int(match.group(1))
         return None
 
+    def extract_year(self, text: str) -> Optional[int]:
+        """从文本中提取年份，支持 (2024), [2024], 2024 等格式"""
+        match = re.search(r'(?:^|\D)(\d{4})(?:\D|$)', text)
+        if match:
+            return int(match.group(1))
+        return None
+
     def clean_title(self, raw_title: str) -> str:
-        """去除常见前缀，如 '🎬 标题：', '🎬 标题:' 等，并去除首尾空格"""
-        # 移除常见前缀（支持中英文冒号）
-        raw_title = re.sub(r'^[🎬🎥🎞️📀📁]\s*标题[：:]\s*', '', raw_title)
-        # 移除其他可能的符号前缀（如表情符号）
+        """去除常见前缀、后缀，移除年份、TMDB ID、剧集信息等，返回干净标题"""
+        # 移除开头的表情符号和常见前缀
         raw_title = re.sub(r'^[\U0001F300-\U0001F9FF\s]+', '', raw_title)
-        return raw_title.strip()
+        raw_title = re.sub(r'^[🎬🎥🎞️📀📁]\s*标题[：:]\s*', '', raw_title)
+        
+        # 移除年份（如 (2024)、[2024]、2024）
+        raw_title = re.sub(r'\s*[\(\[]?\d{4}[\)\]]?\s*', '', raw_title)
+        
+        # 移除 TMDB ID 标记（如 {tmdb-12345}, [tmdbid=12345], tmdb-12345）
+        raw_title = re.sub(r'\s*(?:[\(\{\[]?\s*(?:tmdb|id)[\s\-=]?\d+\s*[\)\}\]]?)', '', raw_title, flags=re.IGNORECASE)
+        
+        # 移除剧集信息，如 S01E13, S01E01-E06, 第 13 集 等（中英文）
+        raw_title = re.sub(r'\s*(?:S\d+E\d+(?:-E\d+)?|第\s*\d+\s*[集季]|Season\s*\d+)\s*', '', raw_title, flags=re.IGNORECASE)
+        
+        # 移除常见的视频格式信息，如 1080p, 2160p, WEB-DL, HDR 等（可选，保留更干净的标题）
+        raw_title = re.sub(r'\s*(?:1080[pi]|2160[pi]|4K|WEB-?DL|HDTV|HDR|DV|FLAC|DDP|AAC|H\.?265|H\.?264|REMUX|BluRay)', '', raw_title, flags=re.IGNORECASE)
+        
+        # 去除多余空格和标点
+        raw_title = re.sub(r'[.\-_]+$', '', raw_title)  # 去除末尾的 .-_
+        raw_title = re.sub(r'^\s+|\s+$', '', raw_title)
+        return raw_title
 
     def parse_title_year(self, raw_title: str) -> Tuple[str, Optional[int]]:
-        """从原始标题中提取标题和年份，格式如 '神探科莫兰 (2017)' 或 '神探科莫兰 2017'"""
-        # 先清洗标题
-        cleaned = self.clean_title(raw_title)
-        
-        # 尝试匹配括号内的年份
-        match = re.search(r'(.+?)\s*[\(（](\d{4})[\)）]', cleaned)
-        if match:
-            title = match.group(1).strip()
-            year = int(match.group(2))
-            return title, year
-        
-        # 尝试匹配空格后的年份
-        match = re.search(r'(.+?)\s+(\d{4})$', cleaned)
-        if match:
-            title = match.group(1).strip()
-            year = int(match.group(2))
-            return title, year
-        
-        # 无年份
-        return cleaned, None
+        """从原始标题中提取标题和年份，返回干净标题和年份"""
+        year = self.extract_year(raw_title)
+        clean = self.clean_title(raw_title)
+        return clean, year
 
     def match_rule(self, media_info: Dict) -> Optional[Dict]:
         """根据媒体信息匹配规则"""
