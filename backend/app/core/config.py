@@ -47,6 +47,9 @@ class Settings(BaseSettings):
     TMDB_API_KEY: str = ""
     TMDB_CONFIG: str = "{}"  # JSON 字符串，存放规则
 
+    # 新增：整理根目录，为空则使用 P115_SAVE_DIR
+    P115_ORGANIZE_BASE_DIR: str = ""
+
     def _migrate_columns(self, conn):
         """Check all model tables for missing columns and add them via ALTER TABLE"""
         from sqlalchemy import inspect, text
