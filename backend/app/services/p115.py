@@ -12,7 +12,7 @@ from typing import Literal, Optional, Tuple, Union, List, Dict
 from app.core.database import async_session
 from app.models.schema import PendingLink, LinkHistory
 from sqlalchemy import select, delete
-from app.services.tmdb import TMDBClient, MediaOrganizer  # 整理功能依赖
+from app.services.tmdb import TMDBClient, MediaOrganizer
 
 # 默认 API 请求超时（秒）
 API_TIMEOUT = 60
@@ -383,13 +383,11 @@ class P115Service:
             save_res = await self._save_share_link_internal(share_url, metadata, target_dir)
             if save_res and save_res.get("status") == "success":
                 # 整理文件
-                if metadata:
-                    save_res = await self._organize_files(save_res, metadata)
+                save_res = await self._organize_files(save_res, metadata)
                 share_res = await self.create_share_link(save_res)
                 if isinstance(share_res, str):
                     return {"status": "success", "share_link": share_res}
                 elif isinstance(share_res, dict) and share_res.get("status") == "error":
-                    # 将创建分享时的特定错误映射回转存结果
                     return {
                         "status": "error",
                         "error_type": share_res.get("error_type", "share_failed"),
@@ -449,8 +447,6 @@ class P115Service:
             # 即使包含违规内容标志，也尝试继续处理，因为很多时候文件列表依然可用
             if have_vio_file == 1:
                 logger.warning(f"⚠️ 分享链接包含违规内容标志 (have_vio_file=1): {share_url}")
-                # 不再直接返回错误，允许逻辑继续执行以检查 items 列表
-
 
             is_snapshotting = "正在生成文件快照" in str(snap_resp)
             if share_state == 0 or is_snapshotting:
@@ -532,8 +528,6 @@ class P115Service:
             logger.info(f"📦 检测到 {len(fids)} 个项目: {', '.join(names[:3])}{'...' if len(names) > 3 else ''}")
             
             # 3. Ensure save directory (with network recovery retry)
-            #    If _ensure_save_dir fails (e.g. network issue), pause and retry
-            #    for up to 30 minutes instead of discarding the task.
             to_cid = None
             max_network_wait = 1800  # 30 minutes
             network_start = time.time()
@@ -567,7 +561,6 @@ class P115Service:
             
             # 4. Receive files
             # 💡 增加预检：在大文件保存前尝试清理
-            # 提取分享的总大小用于精准容量判断
             try:
                 total_size = int(share_info.get("file_size") or 0)
             except (ValueError, TypeError):
@@ -675,9 +668,7 @@ class P115Service:
                 }
 
             # 检查是否为"已经接收"异常 (errno 4200045)
-            # 在某些情况下外层抛出的异常是纯文本，不包含在 errno 里
             if errno_val == 4200045 or "4200045" in error_msg or "已经接收" in error_msg or "已接收" in error_msg:
-                # 重新构建 payload，这里可能外层没有 receive_payload，按现有信息构建
                 retry_payload = {
                     "share_code": payload["share_code"],
                     "receive_code": payload["receive_code"] or "",
@@ -744,7 +735,6 @@ class P115Service:
             self.client, share_code, receive_code, async_=True
         ):
             if pid not in cid_map:
-                # 如果因为中转清理丢失了映射，重建它
                 logger.info(f"🔄 正在递归深度中重建目录结构 (Share CID: {pid})...")
                 cid_map[pid] = await reconstruct_path(pid, cid_map)
                 
@@ -780,7 +770,6 @@ class P115Service:
                 
             for i in range(0, len(fids), 500):
                 # 🚦 检查是否需要中转清理
-                # 条件：已处理超过 10,000 文件，或者容量接近上限 (90%)
                 need_cleanup = files_saved_total >= 10000
                 if not need_cleanup and settings.P115_CLEANUP_CAPACITY_ENABLED:
                     used, total = await self.get_storage_stats()
@@ -790,38 +779,24 @@ class P115Service:
 
                 if need_cleanup:
                     logger.info("📦 触发中转流程：正在生成当前已保存内容的分享链接...")
-                    # 这里的 CID 获取可能不准，因为我们是全量清理，所以直接分享保存目录根节点
                     save_dir_cid = await self._ensure_save_dir()
-                    save_name = settings.P115_SAVE_DIR
-                    # 获取保存目录的父 CID 和 自己的名字，以便 create_share_link 能找到它
-                    # 由于 _ensure_save_dir 只给出了 CID，我们假设它就在根目录下或者我们可以通过其它方式分享
-                    # 简化逻辑：直接分享保存目录下的所有东西
-                    # 重新构造一个 save_result 来调用 create_share_link
-                    # 注意：我们要找的是保存目录里的东西
-                    try:
-                        # 列出保存目录下的顶级文件/文件夹名
-                        ls_resp = await self._api_call_with_timeout(
-                            self.client.fs_files_app2, save_dir_cid, async_=True,
-                            **self._get_ios_ua_kwargs()
-                        )
-                        ls_items = ls_resp.get("data", [])
-                        ls_names = [it["n"] for it in ls_items]
-                        
-                        if ls_names:
-                            intermediate_link = await self.create_share_link({"to_cid": save_dir_cid, "names": ls_names})
-                            if intermediate_link:
-                                logger.info(f"📤 中转链接已生成: {intermediate_link}")
-                                share_links.append(intermediate_link)
-                                # TODO: 这里如果能通过机器人发送即时消息更好
-                    except Exception as share_e:
-                        logger.error(f"❌ 中转分享生成失败: {share_e}")
+                    ls_resp = await self._api_call_with_timeout(
+                        self.client.fs_files_app2, save_dir_cid, async_=True,
+                        **self._get_ios_ua_kwargs()
+                    )
+                    ls_items = ls_resp.get("data", [])
+                    ls_names = [it["n"] for it in ls_items]
+                    
+                    if ls_names:
+                        intermediate_link = await self.create_share_link({"to_cid": save_dir_cid, "names": ls_names})
+                        if intermediate_link:
+                            logger.info(f"📤 中转链接已生成: {intermediate_link}")
+                            share_links.append(intermediate_link)
 
-                    # 执行清理
                     await self._do_cleanup_logic()
                     logger.info("🧹 中转清理完成，等待 5 秒恢复...")
                     await asyncio.sleep(5)
                     
-                    # 重置计数器并重建当前路径映射
                     files_saved_total = 0
                     current_target_pid = await reconstruct_path(pid, cid_map)
                 
@@ -844,7 +819,6 @@ class P115Service:
                     
                     await asyncio.sleep(random.randint(2, 3))
                 except Exception as e:
-                    # 尝试提取 errno
                     errno_val = getattr(e, "errno", None)
                     if hasattr(e, 'args') and len(e.args) >= 2 and isinstance(e.args[1], dict):
                         if not errno_val:
@@ -857,17 +831,7 @@ class P115Service:
         return share_links
 
     async def get_share_status(self, share_url: str):
-        """Check the current status of a share link
-        
-        Returns:
-            dict: {
-                "share_state": int,
-                "is_auditing": bool,
-                "is_expired": bool,
-                "is_prohibited": bool,
-                "title": str
-            }
-        """
+        """Check the current status of a share link"""
         try:
             payload = share_extract_payload(share_url)
             snap_resp = await self._api_call_with_timeout(
@@ -904,7 +868,6 @@ class P115Service:
             return res
         except Exception as e:
             error_msg = str(e)
-            # 检查是否为链接失效或取消错误 (errno 4100009 或 4100010)
             if any(code in error_msg for code in ["4100009", "4100010"]) or \
                any(msg in error_msg for msg in ["链接已失效", "分享已取消"]):
                 logger.warning(f"⏰ 检查链接状态发现链接已失效或被取消: {share_url}")
@@ -930,20 +893,10 @@ class P115Service:
             return None
 
     async def _find_files_in_dir(self, cid: int, target_names: list) -> list:
-        """在指定目录中查找文件，使用多种方式确保找到
-        
-        优先使用 fs_search（按文件名搜索），失败后回退到 fs_files（列目录）。
-        
-        Args:
-            cid: 目录 ID
-            target_names: 要查找的文件名列表
-            
-        Returns:
-            匹配的文件列表 [{fid, name, size, time}, ...]
-        """
+        """在指定目录中查找文件，使用多种方式确保找到"""
         matched = []
         
-        # 方式 1: 使用 fs_search 按文件名搜索（更可靠，不依赖目录缓存）
+        # 方式 1: 使用 fs_search 按文件名搜索
         for name in target_names:
             try:
                 search_resp = await self._api_call_with_timeout(
@@ -956,7 +909,6 @@ class P115Service:
                 check_response(search_resp)
                 search_data = search_resp.get("data", [])
                 
-                # fs_search 的结果可能在 data 数组或 data.list 中
                 if isinstance(search_data, dict):
                     search_items = search_data.get("list", [])
                 else:
@@ -999,11 +951,9 @@ class P115Service:
             check_response(resp)
             file_list = resp.get("data", [])
             
-            # 检查 data 的类型，兼容不同响应格式
             if isinstance(file_list, dict):
                 file_list = file_list.get("list", [])
             
-            # 获取响应中的实际 CID，验证是否正确列出了目标目录
             resp_path = resp.get("path", [])
             resp_cid = None
             if resp_path:
@@ -1013,11 +963,9 @@ class P115Service:
             actual_count = resp.get("count", "?")
             logger.debug(f"📂 fs_files CID:{cid} 返回 {len(file_list)} 项 (总数: {actual_count}, 路径CID: {resp_cid})")
             
-            # 验证返回的是否是正确的目录（防止 CID 不存在时回退到根目录）
             if resp_cid is not None and str(resp_cid) != str(cid):
                 logger.warning(f"⚠️ fs_files 返回的目录 CID({resp_cid}) 与请求的 CID({cid}) 不匹配！可能目录不存在")
             
-            # 日志打印目录中的前10个文件名，便于排查
             if file_list:
                 dir_file_names = [(item.get("n") or item.get("fn") or item.get("name") or item.get("file_name") or item.get("title") or item.get("category_name") or f"? (keys: {list(item.keys())})") for item in file_list[:10]]
                 logger.debug(f"📋 目录内文件(前10): {dir_file_names}")
@@ -1048,28 +996,24 @@ class P115Service:
         names = save_result.get("names", [])
         
         try:
-            # 5. Wait for a short time to allow 115 to start processing
             logger.info(f"⏳ 等待 2 秒以确保文件保存开始...")
             await asyncio.sleep(2)
             
-            # 6. Find files with polling (using search + list as fallback)
             new_fids = []
             matched_files = []
             
-            max_poll_attempts = 10  # 增加尝试次数，但由于间隔缩短，总时间其实减少了
+            max_poll_attempts = 10
             for poll_attempt in range(1, max_poll_attempts + 1):
                 try:
                     logger.info(f"🔍 正在查找文件 (第 {poll_attempt}/{max_poll_attempts} 次), 目标目录 CID: {to_cid}")
                     current_matched = await self._find_files_in_dir(to_cid, names)
                     
                     if current_matched:
-                        # 优化：如果找到的所有文件名和预期一致且数量相等，立即认为完成
                         if len(current_matched) == len(names):
                             logger.info(f"✅ 文件已全部到达，共 {len(current_matched)} 个，立即继续")
                             new_fids = [f["fid"] for f in current_matched]
                             break
                         
-                        # 如果还没凑齐，再对比下状态是否稳定（旧逻辑作为保底）
                         if matched_files:
                             stable = len(current_matched) == len(matched_files)
                             if stable:
@@ -1100,7 +1044,6 @@ class P115Service:
                     if poll_attempt < max_poll_attempts:
                         await asyncio.sleep(5)
             
-            # If polling didn't find stable files, use the last matched files
             if not new_fids and matched_files:
                 logger.info(f"⚠️ 文件未完全稳定，但使用 {len(matched_files)} 个已匹配的文件尝试创建分享")
                 new_fids = [f["fid"] for f in matched_files]
@@ -1109,12 +1052,10 @@ class P115Service:
                 logger.warning(f"⚠️ 在保存目录 {to_cid} 中未找到对应的文件 {names}，可能 115 处理延迟或保存失败")
                 return None
             
-            # 7. Create new share with retry mechanism and split if > 10,000 files
             share_links = []
             fids_str_list = [str(fid) for fid in new_fids]
             max_share_retries = 3
             
-            # Split fids into batches of 10,000 to respect 115 limits
             for batch_idx, i in enumerate(range(0, len(fids_str_list), 10000), 1):
                 batch_fids = fids_str_list[i:i+10000]
                 batch_share_code = None
@@ -1144,11 +1085,10 @@ class P115Service:
                             await asyncio.sleep(5)
                         else:
                             logger.error(f"❌ 创建分享分卷 {batch_idx} 失败: {share_error}")
-                            if batch_idx == 1: raise # If even the first batch fails, raise
-                            break # Otherwise skip this batch
+                            if batch_idx == 1: raise
+                            break
                 
                 if batch_share_code:
-                    # Update share to permanent
                     try:
                         logger.info(f"🔄 正在将分享链接 {batch_share_code} 转换为长期有效...")
                         await self._api_call_with_timeout(
@@ -1168,7 +1108,6 @@ class P115Service:
                 logger.error("❌ 未能生成任何分享链接")
                 return None
             
-            # Format multi-link response if split occurred
             if len(share_links) > 1:
                 formatted_links = []
                 for idx, link in enumerate(share_links, 1):
@@ -1183,7 +1122,6 @@ class P115Service:
             
         except Exception as e:
             logger.error(f"❌ 创建新分享链接失败: {e}")
-            # 检查是否是由于违规导致的空文件夹分享失败 (errno 4100016)
             error_info = getattr(e, "args", [None, {}])[1] if hasattr(e, "args") and len(e.args) >= 2 else {}
             errno_val = error_info.get("errno") if isinstance(error_info, dict) else None
             
@@ -1194,7 +1132,6 @@ class P115Service:
                     "message": "链接包含违规内容，无法转存分享"
                 }
             
-            # 检查分享限制
             error_msg = str(e)
             if "限制分享" in error_msg:
                 logger.warning(f"🚫 触发 115 分享限制")
@@ -1209,7 +1146,6 @@ class P115Service:
             return None
 
     async def cleanup_save_directory(self, wait: bool = True):
-        """Clean up the save directory by deleting the entire folder (with locking)."""
         try:
             async with self._acquire_task_lock("cleanup", wait=wait):
                 return await self._cleanup_save_directory_internal()
@@ -1217,7 +1153,6 @@ class P115Service:
             return False
 
     async def _cleanup_save_directory_internal(self) -> bool:
-        """Internal logic to clean up the save directory (no locking)."""
         try:
             logger.info(f"🧹 开始清理保存目录: {settings.P115_SAVE_DIR}")
             cid = await self._ensure_save_dir()
@@ -1239,7 +1174,6 @@ class P115Service:
             return False
 
     async def get_storage_stats(self) -> Tuple[int, int]:
-        """Get storage stats (used, total) of 115 Drive in bytes"""
         if not self.client:
             return 0, 0
         try:
@@ -1253,29 +1187,20 @@ class P115Service:
             
             def extract_size(val) -> int:
                 if isinstance(val, dict):
-                    # Handle cases like {'size': '...', 'size_format': '...'} or {'size_total': ...}
                     return int(val.get("size") or val.get("size_total") or val.get("size_use") or 0)
                 try:
                     return int(val) if val is not None else 0
                 except (ValueError, TypeError):
                     return 0
 
-            # Try common keys for used and total space
             used = extract_size(data.get("all_used") or data.get("all_use") or data.get("used") or 0)
             total = extract_size(data.get("all_total") or data.get("total") or 0)
-            
             return used, total
         except Exception as e:
             logger.error("❌ 获取网盘容量失败: {}", str(e))
             return 0, 0
 
     async def check_and_prepare_capacity(self, file_count: int = 0, total_size: int = 0):
-        """Check capacity and optionally clean up before starting a task (internal/no-lock).
-        
-        Trigger cleanup if:
-        1. file_count > 500 AND total_size > remainder (Avoid predictive cleanup if space is enough)
-        2. Space is tighter than configured threshold (Target maintenance)
-        """
         if not settings.P115_CLEANUP_CAPACITY_ENABLED:
             return
 
@@ -1285,35 +1210,21 @@ class P115Service:
             
         remaining_bytes = total_bytes - used_bytes
 
-        # 1. Predictive cleanup for batch tasks
-        # Only cleanup if we have many files AND they might not fit
         if file_count > 500 and total_size > remaining_bytes:
             logger.info(f"🚀 预测性清理：检测到大批量文件 ({file_count} 个, {total_size/(1024**3):.2f}GB)，剩余空间不足，执行清理...")
             await self._do_cleanup_logic()
-            await asyncio.sleep(3) # Wait for 115 to sync
+            await asyncio.sleep(3)
             return
 
-        # 2. Threshold-based maintenance cleanup
-        # Modified: Only cleanup if the new file(s) won't fit, regardless of threshold
-        # If total_size is 0 (unknown), we skip cleanup unless we are critically low (e.g. < 1GB)
-        # But per user request: "remove the logic that cleans up just because it's over threshold"
-        
         if total_size > 0 and total_size > remaining_bytes:
              logger.warning(f"⚠️ 剩余空间不足 (需 {total_size/(1024**3):.2f}GB, 剩 {remaining_bytes/(1024**3):.2f}GB)，执行清理...")
              await self._do_cleanup_logic()
              await asyncio.sleep(3)
 
     async def check_capacity_and_cleanup(self, mode: str = "manual"):
-        """Check current capacity and trigger cleanup if it exceeds limit.
-        
-        Args:
-            mode: "manual", "scheduled", or "batch"
-        """
-        # Determine if we should wait for the lock
         wait_for_lock = True
         if mode == "scheduled":
-            wait_for_lock = False # Skip if busy
-            # 提前检查锁，以便在转存运行时给出明确的“跳过”日志，即便空间充足也告知用户
+            wait_for_lock = False
             try:
                 async with self._acquire_task_lock("capacity_check_probe", wait=False):
                     pass
@@ -1323,10 +1234,7 @@ class P115Service:
         
         logger.debug(f"🔍 [容量检查] 模式: {mode}, 正在获取存储状态...")
             
-        # 1. Determine the threshold
-        # If batch mode and auto-cleanup is disabled, use 10% fallback
         use_fallback = (mode == "batch" and not settings.P115_CLEANUP_CAPACITY_ENABLED)
-        
         limit = settings.P115_CLEANUP_CAPACITY_LIMIT
         unit = settings.P115_CLEANUP_CAPACITY_UNIT
         
@@ -1337,7 +1245,6 @@ class P115Service:
         should_cleanup = False
         
         if use_fallback:
-            # check for 10% remaining
             if (total_bytes - used_bytes) < (total_bytes * 0.1):
                 logger.warning(f"🚨 [批量任务] 剩余空间不足 10% ({(total_bytes-used_bytes)/(1024**4):.2f}TB)，触发硬性清理")
                 should_cleanup = True
@@ -1348,36 +1255,24 @@ class P115Service:
                 should_cleanup = True
         
         if should_cleanup or mode == "manual":
-            # Execute cleanup with non-blocking support for scheduled tasks
             try:
-                # We don't acquire the lock here directly, but pass wait down to atomic cleanup methods
-                # which DO acquire the lock. 
-                # Actually, check_capacity_and_cleanup held lock in original version.
-                # Let's wrap the actual cleanup calls in the lock.
                 async with self._acquire_task_lock("cleanup", wait=wait_for_lock):
                     logger.info(f"🧹 执行容量管理清理 (模式: {mode})...")
-                    # Note: we call internal versions or handle logic here to avoid re-acquiring lock
-                    # But cleanup_save_directory has its own lock. So we need a way to bypass it or透传.
-                    # Best is to have an internal _cleanup method.
                     await self._do_cleanup_logic()
                     return True
             except BlockingIOError:
                 if mode == "scheduled":
-                    # 理论上这里由于之前的 probe 不会轻易触发，但作为安全兜底保留
                     logger.info("⏭️ 定时容量检查：转存锁获取冲突，按计划跳过任务")
                 return False
         else:
-            # Always log available space for debugging
             logger.debug(f"✅ [容量检查] 模式: {mode}, 当前空间充足 ({used_bytes/(1024**4):.2f}TB)，无需清理")
         return False
 
     async def _do_cleanup_logic(self):
-        """Helper to execute both cleanup tasks without lock acquisition."""
         await self._cleanup_save_directory_internal()
         await self._cleanup_recycle_bin_internal()
 
     async def get_history_link(self, original_url: str) -> Optional[Union[str, list[str]]]:
-        """Check if a link has been processed before. Returns string or list of strings."""
         try:
             import json
             from app.models.schema import LinkHistory
@@ -1400,16 +1295,13 @@ class P115Service:
             return None
 
     async def save_history_link(self, original_url: str, share_link: Union[str, list[str]]):
-        """Save processed link(s) to history. share_link can be a list."""
         try:
             import json
             from app.models.schema import LinkHistory
             
-            # Convert list to JSON string
             if isinstance(share_link, list):
                 if not share_link:
                     return
-                # If only one link, store as string, otherwise JSON
                 link_to_store = json.dumps(share_link) if len(share_link) > 1 else share_link[0]
             else:
                 link_to_store = share_link
@@ -1430,7 +1322,6 @@ class P115Service:
             logger.error(f"保存历史记录失败: {e}")
 
     async def delete_all_history_links(self):
-        """Clear all history links"""
         try:
             from app.models.schema import LinkHistory
             from sqlalchemy import delete
@@ -1443,7 +1334,6 @@ class P115Service:
             logger.error(f"清空历史记录失败: {e}")
             return False
 
-    # ========== 新增：获取所有历史记录 ==========
     async def get_all_history_links(self, limit: int = 50) -> List[Dict]:
         """获取所有历史记录，按时间倒序"""
         try:
@@ -1468,7 +1358,6 @@ class P115Service:
             return []
 
     async def cleanup_recycle_bin(self, wait: bool = True):
-        """Empty the recycle bin (with locking)."""
         try:
             async with self._acquire_task_lock("cleanup", wait=wait):
                 return await self._cleanup_recycle_bin_internal()
@@ -1476,7 +1365,6 @@ class P115Service:
             return False
 
     async def _cleanup_recycle_bin_internal(self) -> bool:
-        """Internal logic to empty the recycle bin (no locking)."""
         try:
             logger.info("🗑️ 开始清空回收站...")
             payload = {}
@@ -1496,28 +1384,31 @@ class P115Service:
             logger.error("❌ 内部清空回收站失败: {}", e)
             return False
 
-    # ========== 整理相关方法 ==========
+    # ========== 整理方法 ==========
     async def _organize_files(self, save_result: dict, metadata: dict) -> dict:
-        """整理文件：识别媒体、移动目录、重命名"""
+        """整理文件：识别媒体、移动目录、重命名
+           使用转存后的文件/文件夹名作为标题来源
+        """
         if not settings.TMDB_API_KEY:
             logger.debug("TMDB API Key 未配置，跳过整理")
             return save_result
 
-        title_raw = metadata.get('description') or metadata.get('full_text') or ''
-        title_str = metadata.get('title') or title_raw
-        if not title_str:
-            logger.debug("无标题信息，跳过整理")
+        # 直接从 save_result 获取转存后的文件/文件夹名
+        if not save_result.get('names'):
+            logger.debug("save_result 中无文件名信息，跳过整理")
             return save_result
+
+        title_candidate = save_result['names'][0]
+        logger.info(f"使用转存后的文件/文件夹名作为标题: {title_candidate}")
 
         organizer = MediaOrganizer(settings.TMDB_CONFIG)
         tmdb = TMDBClient()
         try:
-            # 1. 尝试提取 TMDB ID
-            tmdb_id = organizer.extract_tmdb_id(title_str)
+            # 1. 尝试从标题中提取 TMDB ID
+            tmdb_id = organizer.extract_tmdb_id(title_candidate)
             media_info = None
 
             if tmdb_id:
-                # 先尝试用 ID 获取详情，需要知道 media_type，分别查询 movie 和 tv
                 for mtype in ['movie', 'tv']:
                     media_info = await tmdb.get_details(mtype, tmdb_id)
                     if media_info:
@@ -1529,13 +1420,13 @@ class P115Service:
 
             if not media_info:
                 # 2. 提取标题和年份进行搜索
-                clean_title, year = organizer.parse_title_year(title_str)
+                clean_title, year = organizer.parse_title_year(title_candidate)
                 media_info = await tmdb.search_multi(clean_title, year)
                 if media_info:
                     logger.info(f"通过标题搜索找到媒体: {clean_title}")
 
             if not media_info:
-                logger.info(f"TMDB 未识别到媒体: {title_str[:50]}")
+                logger.info(f"TMDB 未识别到媒体: {title_candidate[:50]}")
                 return save_result
 
             # 获取详细信息（如果需要）
@@ -1550,7 +1441,7 @@ class P115Service:
                 logger.info(f"未匹配到规则: {clean_title}")
                 return save_result
 
-            # 确定目标目录
+            # 确定目标目录（使用整理根目录配置）
             target_path = organizer.get_target_path(rule)
             target_cid = await self._ensure_save_dir(target_path)
 
@@ -1564,14 +1455,13 @@ class P115Service:
                 old_fid = await self._find_single_fid(to_cid, names[0])
                 if old_fid:
                     try:
-                        # 使用 fs_rename 移动并重命名
                         await self._api_call_with_timeout(
                             self.client.fs_rename,
                             old_fid, new_name, pid=target_cid,
                             async_=True, **self._get_ios_ua_kwargs()
                         )
                         logger.info(f"✅ 已移动并重命名 {names[0]} -> {target_path}/{new_name}")
-                        # 更新 save_result
+                        # 更新 save_result，以便后续分享链接使用新位置和新名称
                         save_result['to_cid'] = target_cid
                         save_result['names'] = [new_name]
                     except Exception as e:
