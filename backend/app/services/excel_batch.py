@@ -460,11 +460,15 @@ class ExcelBatchService:
                 if item.item_metadata:
                     metadata = item.item_metadata.copy()
                     metadata["share_url"] = original_url
+                    # 新增：添加标题字段，用于整理功能
+                    metadata["title"] = item.title
                 else:
                     metadata = {
                         "description": item.title or "Excel Batch Import",
                         "full_text": f"云盘分享\n资源名称：{item.title or '未知'}\n分享链接：{{{{share_link}}}}",
-                        "share_url": original_url
+                        "share_url": original_url,
+                        # 新增：添加标题字段，用于整理功能
+                        "title": item.title
                     }
                 
                 # Combine password if present for saving
