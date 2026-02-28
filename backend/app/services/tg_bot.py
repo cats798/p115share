@@ -226,7 +226,8 @@ class TGService:
                     "full_text": segment_info["text"] if segment_info else full_text,
                     "photo_id": segment_info["photo_id"] if segment_info else (photo.file_id if photo else None),
                     "share_url": share_url,
-                    "entities": segment_info["entities"] if segment_info else ser_entities
+                    "entities": segment_info["entities"] if segment_info else ser_entities,
+                    "title": segment_info["title"] if segment_info else None  # 新增：传入标题
                 }
                 save_res = await p115_service.save_and_share(share_url, metadata=metadata)
                 
@@ -294,7 +295,7 @@ class TGService:
         # Strategy: Segment from last boundary to current link, then extend to a natural break point.
         
         last_boundary = 0
-        segments = [] # List of (segmented_text, segmented_entities, target_url)
+        segments = [] # List of (segmented_text, segmented_entities, target_url, title)
         for idx, pos in enumerate(link_positions):
             start_u16, end_u16, url = pos
             
@@ -327,11 +328,31 @@ class TGService:
                 seg_end = text_utf16_len
             
             slice_text, slice_entities = self._slice_message(full_text, ser_entities, last_boundary, seg_end)
+            
+            # ----- 新增：从切片文本中提取标题 -----
+            title = None
+            # 尝试匹配 "🎬 标题：XXX" 或 "🎬 标题: XXX"
+            match = re.search(r'[🎬🎥]?\s*标题[：:]\s*([^\n]+)', slice_text)
+            if match:
+                title = match.group(1).strip()
+            else:
+                # 如果没有匹配，取第一行（去除表情符号）
+                first_line = slice_text.split('\n')[0].strip()
+                # 移除开头的表情符号
+                first_line = re.sub(r'^[\U0001F300-\U0001F9FF\s]+', '', first_line)
+                if first_line:
+                    title = first_line
+            # 如果仍然没有，用 URL 的后几位作为后备（避免空值）
+            if not title:
+                title = f"资源_{url[-10:]}"
+            # ----- 结束新增 -----
+
             segments.append({
                 "text": slice_text,
                 "entities": slice_entities,
                 "url": url,
-                "photo_id": photo.file_id if photo else None
+                "photo_id": photo.file_id if photo else None,
+                "title": title  # 新增字段
             })
             last_boundary = seg_end
 
