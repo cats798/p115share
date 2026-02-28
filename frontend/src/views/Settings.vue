@@ -66,13 +66,18 @@
           <a-button type="primary" @click="onFinish('tg')" :loading="loading" block>保存 Telegram 配置</a-button>
         </a-collapse-panel>
 
-        <!-- 115 网盘配置面板 -->
+        <!-- 115 网盘配置面板（添加了整理根目录） -->
         <a-collapse-panel key="p115" header="115 网盘配置">
           <a-form-item label="Cookie" name="p115_cookie">
             <a-textarea v-model:value="formState.p115_cookie" :rows="4" placeholder="请输入 115 Cookie" />
           </a-form-item>
           <a-form-item label="保存路径" name="p115_save_dir">
             <a-input v-model:value="formState.p115_save_dir" placeholder="例如 /分享保存" />
+          </a-form-item>
+          <!-- 新增：整理根目录 -->
+          <a-form-item label="整理根目录" name="p115_organize_base_dir">
+            <a-input v-model:value="formState.p115_organize_base_dir" placeholder="例如 /已整理，留空则使用保存路径" />
+            <div style="font-size: 12px; color: #999; margin-top: 4px">整理后的文件将移动到此目录下的分类子目录中</div>
           </a-form-item>
           <a-form-item label="清理保存目录 (Cron)" name="p115_cleanup_dir_cron">
             <a-input v-model:value="formState.p115_cleanup_dir_cron" placeholder="例如 */30 * * * *" />
@@ -178,7 +183,7 @@
           <a-button type="primary" @click="onFinish('proxy')" :loading="loading" block>保存代理配置</a-button>
         </a-collapse-panel>
 
-        <!-- TMDB 整理配置面板（新增） -->
+        <!-- TMDB 整理配置面板 -->
         <a-collapse-panel key="tmdb" header="TMDB 整理配置">
           <a-form-item label="TMDB API Key">
             <a-input-password v-model:value="formState.tmdb_api_key" placeholder="输入 TMDB API Key" />
@@ -232,6 +237,7 @@ const formState = reactive({
   tg_allow_chats: '',
   p115_cookie: '',
   p115_save_dir: '',
+  p115_organize_base_dir: '',  // 新增
   p115_cleanup_dir_cron: '',
   p115_cleanup_trash_cron: '',
   p115_recycle_password: '',
@@ -317,6 +323,7 @@ const loadConfig = async () => {
     
     formState.p115_cookie = res.data.p115_cookie || '';
     formState.p115_save_dir = res.data.p115_save_dir || '';
+    formState.p115_organize_base_dir = res.data.p115_organize_base_dir || '';  // 新增
     formState.p115_cleanup_dir_cron = res.data.p115_cleanup_dir_cron || '';
     formState.p115_cleanup_trash_cron = res.data.p115_cleanup_trash_cron || '';
     formState.p115_recycle_password = res.data.p115_recycle_password || '';
@@ -343,7 +350,8 @@ const onFinish = async (section: 'tg' | 'p115' | 'proxy' | 'tmdb' = 'tg') => {
       p115: [
         'p115_cookie', 'p115_save_dir', 'p115_cleanup_dir_cron', 
         'p115_cleanup_trash_cron', 'p115_recycle_password',
-        'p115_cleanup_capacity_enabled', 'p115_cleanup_capacity_limit', 'p115_cleanup_capacity_unit'
+        'p115_cleanup_capacity_enabled', 'p115_cleanup_capacity_limit', 'p115_cleanup_capacity_unit',
+        'p115_organize_base_dir'  // 新增
       ],
       proxy: ['proxy_enabled', 'proxy_host', 'proxy_port', 'proxy_user', 'proxy_pass', 'proxy_type'],
       tmdb: ['tmdb_api_key', 'tmdb_config']
@@ -456,7 +464,7 @@ const detectProtocol = async () => {
   }
 };
 
-// 新增：上传 TMDB 配置文件
+// 上传 TMDB 配置文件
 const uploadTmdbConfig = (file: File) => {
   const reader = new FileReader();
   reader.onload = (e) => {
