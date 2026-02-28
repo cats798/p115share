@@ -35,6 +35,7 @@ class ConfigUpdate(BaseModel):
     p115_cleanup_capacity_unit: Optional[str] = None
     tmdb_api_key: Optional[str] = None
     tmdb_config: Optional[str] = None
+    p115_organize_base_dir: Optional[str] = None  # 新增
 
     @field_validator('p115_cleanup_dir_cron', 'p115_cleanup_trash_cron')
     @classmethod
@@ -88,6 +89,8 @@ async def update_config(cfg: ConfigUpdate, user=Depends(get_current_user)):
         await settings.save_setting("P115_SAVE_DIR", cfg.p115_save_dir)
     if "p115_recycle_password" in update_data:
         await settings.save_setting("P115_RECYCLE_PASSWORD", cfg.p115_recycle_password)
+    if "p115_organize_base_dir" in update_data:  # 新增
+        await settings.save_setting("P115_ORGANIZE_BASE_DIR", cfg.p115_organize_base_dir)
     
     # 3. Update Proxy settings
     proxy_fields = ["proxy_enabled", "proxy_host", "proxy_port", "proxy_user", "proxy_pass", "proxy_type"]
@@ -177,6 +180,7 @@ async def get_config(user=Depends(get_current_user)):
         "p115_cleanup_capacity_unit": settings.P115_CLEANUP_CAPACITY_UNIT,
         "tmdb_api_key": settings.TMDB_API_KEY,
         "tmdb_config": settings.TMDB_CONFIG,
+        "p115_organize_base_dir": settings.P115_ORGANIZE_BASE_DIR,  # 新增
         "version": VERSION
     }
 
@@ -325,7 +329,6 @@ async def clear_history(user=Depends(get_current_user)):
         from fastapi import HTTPException
         raise HTTPException(status_code=500, detail="清空历史记录失败")
 
-# 新增 TMDB 测试接口
 @router.post("/test-tmdb")
 async def test_tmdb(cfg: ConfigUpdate, user=Depends(get_current_user)):
     from app.services.tmdb import TMDBClient
