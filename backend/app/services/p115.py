@@ -1464,14 +1464,22 @@ class P115Service:
                             old_fid, new_name, pid=target_cid,
                             async_=True, **self._get_ios_ua_kwargs()
                         )
-                        # 处理可能的返回值格式
+                        
+                        # 判断响应是否成功
                         success = False
-                        if isinstance(resp, dict):
-                            success = resp.get('state', False)
-                        elif isinstance(resp, tuple) and len(resp) >= 1:
-                            success = bool(resp[0])  # 第一个元素是状态
+                        if resp is None:
+                            success = False
+                        elif isinstance(resp, dict):
+                            success = resp.get('state', False) or resp.get('errCode') == 0
+                        elif isinstance(resp, bool):
+                            success = resp
+                        elif isinstance(resp, int):
+                            success = resp == 0
+                        elif isinstance(resp, str) and resp.lower() in ('true', 'ok', 'success'):
+                            success = True
                         else:
-                            # 如果返回其他类型，可能直接表示成功
+                            # 如果返回其他类型，可能是成功（根据p115client惯例）
+                            logger.warning(f"未知响应类型: {type(resp)}，假设成功")
                             success = True
                         
                         if success:
