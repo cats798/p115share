@@ -7,12 +7,13 @@ from loguru import logger
 import asyncio
 import time
 import random
+import re
 from contextlib import asynccontextmanager
 from typing import Literal, Optional, Tuple, Union, List, Dict
 from app.core.database import async_session
 from app.models.schema import PendingLink, LinkHistory
 from sqlalchemy import select, delete
-from app.services.tmdb import TMDBClient, MediaOrganizer
+from app.services.tmdb import TMDBClient, MediaOrganizer, SmartMediaAnalyzer, QualityLevel
 
 # 默认 API 请求超时（秒）
 API_TIMEOUT = 60
@@ -1290,14 +1291,10 @@ class P115Service:
             logger.error("❌ 内部清空回收站失败: {}", e)
             return False
 
-    # ========== 整理方法（已修复） ==========
+    # ========== 整理方法（修复版） ==========
     async def _organize_files(self, save_result: dict, metadata: dict) -> dict:
         """整理文件：识别媒体、移动目录、重命名
            使用转存后的文件/文件夹名作为标题来源
-           严格匹配流程：
-           1. 从文件名提取 TMDB ID、年份、干净标题
-           2. 优先用 ID 查询，并验证年份
-           3. 如果 ID 不存在或年份不匹配，用标题搜索并验证年份
         """
         if not settings.TMDB_API_KEY:
             logger.debug("TMDB API Key 未配置，跳过整理")
@@ -1311,15 +1308,18 @@ class P115Service:
         title_candidate = save_result['names'][0]
         logger.info(f"使用转存后的文件/文件夹名作为标题: {title_candidate}")
 
+        # 使用智能分析器解析文件名，获取干净标题和其他信息
+        analyzer = SmartMediaAnalyzer()
+        parsed = analyzer.analyze(title_candidate)
+        clean_title = parsed.title
+        logger.info(f"解析后的干净标题: {clean_title}")
+
         organizer = MediaOrganizer(settings.TMDB_CONFIG)
         tmdb = TMDBClient()
         try:
-            # 1. 从文件名中提取 TMDB ID、年份和干净标题
+            # 1. 尝试从文件名中提取 TMDB ID
             tmdb_id = organizer.extract_tmdb_id(title_candidate)
-            year = organizer.extract_year(title_candidate)
-            clean_title = organizer.clean_title(title_candidate)
-            
-            logger.info(f"提取信息 - 标题: {clean_title}, 年份: {year}, TMDB ID: {tmdb_id}")
+            year = parsed.year or organizer.extract_year(title_candidate)  # 优先使用解析到的年份
             
             media_info = None
             match_method = None
@@ -1327,7 +1327,11 @@ class P115Service:
             # 2. 优先使用 ID 查询
             if tmdb_id:
                 for mtype in ['movie', 'tv']:
-                    media_info = await tmdb.get_details(mtype, tmdb_id)
+                    try:
+                        media_info = await tmdb.get_details(mtype, tmdb_id)
+                    except Exception as e:
+                        logger.warning(f"获取媒体详情失败 (ID {tmdb_id}, type {mtype}): {e}")
+                        continue
                     if media_info:
                         media_info['media_type'] = mtype
                         
@@ -1359,7 +1363,11 @@ class P115Service:
             if not media_info:
                 search_title = clean_title if clean_title else title_candidate
                 logger.info(f"使用标题搜索: {search_title}")
-                media_info = await tmdb.search_multi(search_title, year)
+                try:
+                    media_info = await tmdb.search_multi(search_title, year)
+                except Exception as e:
+                    logger.error(f"TMDB 搜索失败: {e}")
+                    media_info = None
                 
                 if media_info:
                     # 验证搜索结果是否与提取的年份匹配
@@ -1391,9 +1399,12 @@ class P115Service:
             # 4. 获取详细信息（如果需要）
             media_type = media_info.get('media_type')
             if media_type in ['movie', 'tv'] and 'genres' not in media_info:
-                details = await tmdb.get_details(media_type, media_info['id'])
-                if details:
-                    media_info.update(details)
+                try:
+                    details = await tmdb.get_details(media_type, media_info['id'])
+                    if details:
+                        media_info.update(details)
+                except Exception as e:
+                    logger.warning(f"获取媒体详情失败: {e}")
 
             # 5. 匹配规则
             rule = organizer.match_rule(media_info)
@@ -1405,8 +1416,40 @@ class P115Service:
             target_path = organizer.get_target_path(rule)
             target_cid = await self._ensure_save_dir(target_path)
 
-            # 7. 生成新名称
-            new_name = organizer.generate_new_name(rule, media_info)
+            # 7. 生成新名称（使用解析到的技术参数）
+            # 从 parsed 中获取技术参数
+            source = parsed.source
+            resolution = parsed.quality.value if parsed.quality != QualityLevel.UNKNOWN else ''
+            video_codec = parsed.codec
+            audio_codec = parsed.audio
+            season_episode = f"S{parsed.season:02d}E{parsed.episode:02d}" if parsed.season and parsed.episode else ''
+
+            # 使用 TMDB 的标题和年份
+            tmdb_title = media_info.get('title') or media_info.get('name') or ''
+            tmdb_year = (media_info.get('release_date') or media_info.get('first_air_date') or '')[:4] if media_info else ''
+
+            # 构建新文件名
+            parts = [tmdb_title]
+            if tmdb_year:
+                parts.append(tmdb_year)
+            if season_episode:
+                parts.append(season_episode)
+            if source:
+                parts.append(source)
+            if resolution:
+                parts.append(resolution)
+            if video_codec:
+                parts.append(video_codec)
+            if audio_codec:
+                parts.append(audio_codec)
+
+            new_name = '.'.join(parts)
+            # 保留原始扩展名
+            ext_match = re.search(r'\.([a-zA-Z0-9]+)$', title_candidate)
+            if ext_match:
+                new_name = f"{new_name}.{ext_match.group(1)}"
+
+            logger.info(f"生成新文件名: {new_name}")
 
             # 8. 移动/重命名
             to_cid = save_result.get('to_cid')
@@ -1415,35 +1458,29 @@ class P115Service:
                 old_fid = await self._find_single_fid(to_cid, names[0])
                 if old_fid:
                     try:
-                        # 调用 fs_rename，注意返回值可能是元组或字典
+                        # 调用 fs_rename，处理返回值
                         resp = await self._api_call_with_timeout(
                             self.client.fs_rename,
                             old_fid, new_name, pid=target_cid,
                             async_=True, **self._get_ios_ua_kwargs()
                         )
-                        # 检查响应是否成功 - 处理可能的返回值格式
+                        # 处理可能的返回值格式
+                        success = False
                         if isinstance(resp, dict):
-                            if resp.get('state'):
-                                logger.info(f"✅ 已移动并重命名 {names[0]} -> {target_path}/{new_name}")
-                                # 更新 save_result，以便后续分享链接使用新位置和新名称
-                                save_result['to_cid'] = target_cid
-                                save_result['names'] = [new_name]
-                            else:
-                                logger.error(f"❌ 移动/重命名失败，响应: {resp}")
-                        elif isinstance(resp, tuple) and len(resp) >= 2:
-                            # 某些情况下可能返回 (state, data) 格式
-                            state, data = resp[0], resp[1] if len(resp) > 1 else None
-                            if state:
-                                logger.info(f"✅ 已移动并重命名 {names[0]} -> {target_path}/{new_name}")
-                                save_result['to_cid'] = target_cid
-                                save_result['names'] = [new_name]
-                            else:
-                                logger.error(f"❌ 移动/重命名失败，响应: {resp}")
+                            success = resp.get('state', False)
+                        elif isinstance(resp, tuple) and len(resp) >= 1:
+                            success = bool(resp[0])  # 第一个元素是状态
                         else:
-                            # 如果返回的是成功状态码或其他格式，默认认为成功
-                            logger.info(f"✅ 移动/重命名请求已发送 (响应: {resp})")
+                            # 如果返回其他类型，可能直接表示成功
+                            success = True
+                        
+                        if success:
+                            logger.info(f"✅ 已移动并重命名 {names[0]} -> {target_path}/{new_name}")
+                            # 更新 save_result，以便后续分享链接使用新位置和新名称
                             save_result['to_cid'] = target_cid
                             save_result['names'] = [new_name]
+                        else:
+                            logger.error(f"❌ 移动/重命名失败，响应: {resp}")
                     except Exception as e:
                         logger.error(f"❌ 移动/重命名失败: {e}")
                 else:
