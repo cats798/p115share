@@ -1291,7 +1291,7 @@ class P115Service:
             logger.error("❌ 内部清空回收站失败: {}", e)
             return False
 
-    # ========== 整理方法（修复版） ==========
+    # ========== 整理方法（修复版，增强异常处理） ==========
     async def _organize_files(self, save_result: dict, metadata: dict) -> dict:
         """整理文件：识别媒体、移动目录、重命名
            使用转存后的文件/文件夹名作为标题来源
@@ -1451,13 +1451,14 @@ class P115Service:
 
             logger.info(f"生成新文件名: {new_name}")
 
-            # 8. 移动/重命名
+            # 8. 移动/重命名（修复解包错误，增强异常处理）
             to_cid = save_result.get('to_cid')
             names = save_result.get('names', [])
             if len(names) == 1:
                 old_fid = await self._find_single_fid(to_cid, names[0])
                 if old_fid:
                     try:
+                        logger.debug(f"正在移动文件: old_fid={old_fid}, new_name={new_name}, target_cid={target_cid}")
                         # 调用 fs_rename，处理返回值
                         resp = await self._api_call_with_timeout(
                             self.client.fs_rename,
@@ -1469,14 +1470,32 @@ class P115Service:
                         success = False
                         if resp is None:
                             success = False
+                            logger.warning("fs_rename 返回 None")
                         elif isinstance(resp, dict):
                             success = resp.get('state', False) or resp.get('errCode') == 0
+                            if not success:
+                                logger.warning(f"fs_rename 返回失败字典: {resp}")
                         elif isinstance(resp, bool):
                             success = resp
                         elif isinstance(resp, int):
                             success = resp == 0
-                        elif isinstance(resp, str) and resp.lower() in ('true', 'ok', 'success'):
-                            success = True
+                        elif isinstance(resp, str):
+                            success = resp.lower() in ('true', 'ok', 'success')
+                        elif isinstance(resp, (list, tuple)):
+                            # 避免解包错误，直接取第一个元素作为状态
+                            if len(resp) > 0:
+                                first = resp[0]
+                                if isinstance(first, bool):
+                                    success = first
+                                elif isinstance(first, int):
+                                    success = first == 0
+                                elif isinstance(first, str):
+                                    success = first.lower() in ('true', 'ok', 'success')
+                                else:
+                                    logger.warning(f"无法识别的元组元素类型: {type(first)}，假设成功")
+                                    success = True
+                            else:
+                                success = False
                         else:
                             # 如果返回其他类型，可能是成功（根据p115client惯例）
                             logger.warning(f"未知响应类型: {type(resp)}，假设成功")
@@ -1490,7 +1509,7 @@ class P115Service:
                         else:
                             logger.error(f"❌ 移动/重命名失败，响应: {resp}")
                     except Exception as e:
-                        logger.error(f"❌ 移动/重命名失败: {e}")
+                        logger.error(f"❌ 移动/重命名过程发生异常: {e}", exc_info=True)
                 else:
                     logger.warning(f"⚠️ 未找到文件 {names[0]} 进行整理")
             else:
