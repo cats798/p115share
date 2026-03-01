@@ -9,7 +9,7 @@ from enum import Enum
 from collections import OrderedDict
 from pathlib import Path
 
-# ========== 新增：媒体类型枚举 ==========
+# ========== 媒体类型枚举 ==========
 class MediaType(Enum):
     TV_SERIES = "tv_series"
     MOVIE = "movie"
@@ -18,7 +18,7 @@ class MediaType(Enum):
     ANIME = "anime"
     UNKNOWN = "unknown"
 
-# ========== 新增：画质枚举 ==========
+# ========== 画质枚举 ==========
 class QualityLevel(Enum):
     SD = "480p"
     HD = "720p"
@@ -26,7 +26,7 @@ class QualityLevel(Enum):
     UHD = "2160p"
     UNKNOWN = "unknown"
 
-# ========== 新增：解析后的媒体信息数据类 ==========
+# ========== 解析后的媒体信息数据类 ==========
 class ParsedMediaInfo:
     """从文件名解析出的媒体信息"""
     def __init__(self):
@@ -48,7 +48,7 @@ class ParsedMediaInfo:
         self.media_type: MediaType = MediaType.UNKNOWN
         self.original_filename: str = ""
 
-# ========== 新增：智能媒体分析器（借鉴对方代码的核心逻辑）==========
+# ========== 智能媒体分析器 ==========
 class SmartMediaAnalyzer:
     """智能媒体分析器，处理各种规范和不规范的文件名"""
 
@@ -94,6 +94,22 @@ class SmartMediaAnalyzer:
         self.subtitle_patterns = [
             '中字', '英字', '双字', '内嵌', '外挂', 'SUB', 'DUB',
             '简体', '繁体', '中英', '多语'
+        ]
+
+        # 技术参数组合（用于清洗标题）
+        self.tech_patterns = [
+            r'2160p|4K|UHD|1080p|720p|480p|HD|FHD|SD',
+            r'WEB-?DL|WEBRip|BluRay|BDRip|HDTV|DVD|PDTV|CAM|TS|TC|SCR|R5',
+            r'H\.?265|HEVC|H\.?264|AVC|XviD|DivX|VP9|AV1',
+            r'AAC|AC3|DTS|DTS-?HD|TrueHD|FLAC|MP3|Atmos|DTS-?X',
+            r'5\.1|7\.1|2\.0',
+            r'60fps|30fps|24fps|HDR|SDR|DoVi|DV|HDR10',
+            r'REMUX|COMPLETE|FULL|REPACK|PROPER',
+            r'第\d+[集期话]',
+            r'tmdb[-\s]?\d+',
+            r'\{[^}]+\}|\[[^\]]+\]|\([^)]+\)',
+            r'S\d{1,2}E\d{1,3}',
+            r'Season\s*\d+|Episode\s*\d+',
         ]
 
         # 不规范文件名的处理策略 - 按优先级排序
@@ -368,17 +384,18 @@ class SmartMediaAnalyzer:
         return 1
 
     def _extract_title(self, clean_name: str) -> str:
+        """增强版标题提取，彻底移除技术参数"""
         title = clean_name
+        # 移除年份
         title = re.sub(r'\b(19|20)\d{2}\b', '', title)
+        # 移除季集信息
         title = re.sub(r'[\.\s]*[Ss]\d{1,2}[Ee]\d{1,3}[\.\s]*', '', title)
         title = re.sub(r'[\.\s]*第\s*\d+\s*[季集期话][\.\s]*', '', title)
         title = re.sub(r'[\.\s]*(Season|Episode)\s*\d+[\.\s]*', '', title, flags=re.IGNORECASE)
-        for pattern in self.quality_patterns.keys():
+        # 批量移除技术参数
+        for pattern in self.tech_patterns:
             title = re.sub(pattern, '', title, flags=re.IGNORECASE)
-        for source in self.source_patterns:
-            title = re.sub(rf'\b{re.escape(source)}\b', '', title, flags=re.IGNORECASE)
-        for codec in self.codec_patterns:
-            title = re.sub(rf'\b{re.escape(codec)}\b', '', title, flags=re.IGNORECASE)
+        # 清理多余空格和点
         title = re.sub(r'\.+', '.', title)
         title = re.sub(r'^\.|\.+$', '', title)
         title = re.sub(r'\s+', ' ', title).strip()
@@ -473,7 +490,7 @@ class SmartMediaAnalyzer:
         return MediaType.MOVIE
 
 
-# ========== 原有的 TMDBClient 类 ==========
+# ========== TMDBClient 类 ==========
 class TMDBClient:
     """TMDB API 客户端，支持代理"""
     BASE_URL = "https://api.themoviedb.org/3"
@@ -604,7 +621,7 @@ class TMDBClient:
         return None
 
 
-# ========== 原有的 MediaOrganizer 类（已扩展）==========
+# ========== MediaOrganizer 类（已扩展）==========
 class MediaOrganizer:
     """媒体整理引擎，基于 TMDB 数据和规则配置"""
 
@@ -617,10 +634,10 @@ class MediaOrganizer:
                 self.rules = sorted(rules_list, key=lambda x: x.get('priority', 999))
             except Exception as e:
                 logger.error(f"Failed to load TMDB config: {e}")
-        # 新增：智能分析器实例
+        # 智能分析器实例
         self.analyzer = SmartMediaAnalyzer()
 
-    # ===== 原有的方法（保持不变）=====
+    # ===== 原有的方法 =====
     def extract_tmdb_id(self, text: str) -> Optional[int]:
         patterns = [
             r'tmdb[-\s]?(\d+)',
@@ -642,7 +659,6 @@ class MediaOrganizer:
         return None
 
     def extract_season_episode(self, text: str) -> Tuple[Optional[int], Optional[int]]:
-        # 简单的季集提取，保留原样，但实际可能会被 analyzer 覆盖
         season = None
         episode = None
         match = re.search(r'S(\d{1,3})E(\d{1,4})', text, re.IGNORECASE)
@@ -715,7 +731,6 @@ class MediaOrganizer:
         return None
 
     def clean_title(self, raw_title: str) -> str:
-        # 清洗标题，与之前一致
         cleaned = raw_title
         cleaned = re.sub(r'^[\U0001F300-\U0001F9FF\s]+', '', cleaned)
         cleaned = re.sub(r'^[🎬🎥🎞️📀📁]\s*标题[：:]\s*', '', cleaned)
@@ -775,7 +790,7 @@ class MediaOrganizer:
         allowed = [c.strip() for c in condition.split(',')]
         return any(code in allowed for code in country_codes)
 
-    # ===== 修改后的 generate_new_name，使用智能分析器 =====
+    # ===== 生成新文件名的方法（使用智能分析器）=====
     def generate_new_name(self, rule: Dict, media_info: Dict, original_filename: str = None) -> str:
         """根据重命名模板和原始文件名生成新文件名
            格式如：给你爱情处方.2026.S01E09.1080p.WEB-DL.H264.AAC.mkv
