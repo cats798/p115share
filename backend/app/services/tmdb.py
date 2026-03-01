@@ -96,20 +96,25 @@ class SmartMediaAnalyzer:
             '简体', '繁体', '中英', '多语'
         ]
 
-        # 技术参数组合（用于清洗标题）
+        # 技术参数组合（用于清洗标题）- 增强版
         self.tech_patterns = [
             r'2160p|4K|UHD|1080p|720p|480p|HD|FHD|SD',
             r'WEB-?DL|WEBRip|BluRay|BDRip|HDTV|DVD|PDTV|CAM|TS|TC|SCR|R5',
             r'H\.?265|HEVC|H\.?264|AVC|XviD|DivX|VP9|AV1',
             r'AAC|AC3|DTS|DTS-?HD|TrueHD|FLAC|MP3|Atmos|DTS-?X',
             r'5\.1|7\.1|2\.0',
-            r'60fps|30fps|24fps|HDR|SDR|DoVi|DV|HDR10',
+            r'60fps|30fps|24fps|HDR|SDR|DoVi|DV|HDR10|HDR10\+',
             r'REMUX|COMPLETE|FULL|REPACK|PROPER',
             r'第\d+[集期话]',
             r'tmdb[-\s]?\d+',
             r'\{[^}]+\}|\[[^\]]+\]|\([^)]+\)',
             r'S\d{1,2}E\d{1,3}',
             r'Season\s*\d+|Episode\s*\d+',
+            r'WEB\s*DL|WEB\s*Rip',          # 额外匹配空格分隔的
+            r'\bSDR\b|\bHDR\b|\bDV\b',
+            r'\b10bit\b|\b8bit\b',
+            r'\bHEVC\b|\bx265\b|\bx264\b',
+            r'\bAAC\b|\bAC3\b|\bDTS\b',
         ]
 
         # 不规范文件名的处理策略 - 按优先级排序
@@ -399,7 +404,10 @@ class SmartMediaAnalyzer:
         title = re.sub(r'\.+', '.', title)
         title = re.sub(r'^\.|\.+$', '', title)
         title = re.sub(r'\s+', ' ', title).strip()
-        return title if title else "Unknown"
+        # 如果标题为空，返回原始文件名的一部分
+        if not title:
+            title = clean_name[:30]
+        return title
 
     def _extract_year(self, clean_name: str) -> Optional[int]:
         matches = re.findall(r'\b(19[5-9]\d|20[0-4]\d)\b', clean_name)
@@ -793,7 +801,7 @@ class MediaOrganizer:
     # ===== 生成新文件名的方法（使用智能分析器）=====
     def generate_new_name(self, rule: Dict, media_info: Dict, original_filename: str = None) -> str:
         """根据重命名模板和原始文件名生成新文件名
-           格式如：给你爱情处方.2026.S01E09.1080p.WEB-DL.H264.AAC.mkv
+           格式如：光阴之外.2025.S01E11.2160p.HEVC.AAC.mkv
            使用智能分析器从原始文件名中提取技术参数
         """
         media_type = media_info.get('media_type')
