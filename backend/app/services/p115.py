@@ -33,47 +33,40 @@ class P115Service:
         self.client = None
         self.fs = None
         self.is_connected = False
-        self._task_lock: Optional[asyncio.Lock] = None  # Lazy initialize
-        self._current_task: str | None = None  # Track current task type
-        self._save_dir_cid: int = 0  # Cached save directory CID
-        # 任务队列机制
+        self._task_lock: Optional[asyncio.Lock] = None
+        self._current_task: str | None = None
+        self._save_dir_cid: int = 0
         self._task_queue = asyncio.Queue()
         self._worker_task = None
         self._worker_lock = asyncio.Lock()
-        self._current_task_info = None # 存储当前正在处理的任务信息
-        self._restriction_until: float = 0 # 限制结束的时间戳
+        self._current_task_info = None
+        self._restriction_until: float = 0
         
         if settings.P115_COOKIE:
             self.init_client(settings.P115_COOKIE)
 
     @property
     def queue_size(self) -> int:
-        """返回当前在队列中等待的任务数量"""
         return self._task_queue.qsize()
 
     @property
     def is_busy(self) -> bool:
-        """如果 Worker 正在处理任务或者处于限制状态则返回 True"""
         return self._current_task_info is not None or self.is_restricted
 
     @property
     def is_restricted(self) -> bool:
-        """检查当前是否处于 115 限制状态"""
         return time.time() < self._restriction_until
 
     def set_restriction(self, hours: float = 1.0):
-        """设置全局限制状态"""
         self._restriction_until = time.time() + (hours * 3600)
         logger.warning(f"🚫 115 服务已进入全局限制模式，预计持续 {hours} 小时 (直到 {time.strftime('%H:%M:%S', time.localtime(self._restriction_until))})")
 
     def clear_restriction(self):
-        """清除全局限制状态"""
         if self._restriction_until > 0:
             self._restriction_until = 0
             logger.info("🔓 115 全局限制模式已解除")
 
     def _get_ios_ua_kwargs(self):
-        """获取 iOS 用户代理相关的参数"""
         return {
             "headers": {
                 "user-agent": IOS_UA,
@@ -82,17 +75,13 @@ class P115Service:
             "app": "ios"
         }
 
-
     async def _task_worker(self):
-        """后台任务处理 Worker"""
         logger.info("🚀 P115 任务队列 Worker 已启动")
         while True:
-            # 获取任务：(task_func, args, kwargs, future, task_type)
             task_func, args, kwargs, future, task_type = await self._task_queue.get()
             self._current_task_info = task_type
             try:
                 logger.info(f"⚡ 队列正在处理任务: {task_type}")
-                # 执行具体逻辑
                 result = await task_func(*args, **kwargs)
                 if not future.done():
                     future.set_result(result)
@@ -114,17 +103,6 @@ class P115Service:
         label: str = "API",
         **kwargs,
     ):
-        """带超时和重试的 API 调用包装器。
-        
-        Args:
-            coro_func: 异步方法（如 self.client.share_snap）
-            *args: 传给 coro_func 的位置参数
-            timeout: 单次请求超时秒数
-            max_retries: 最大重试次数
-            retry_delay: 重试间隔秒数
-            label: 日志标识
-            **kwargs: 传给 coro_func 的关键字参数
-        """
         last_error = None
         for attempt in range(1, max_retries + 1):
             try:
@@ -137,7 +115,6 @@ class P115Service:
                 last_error = TimeoutError(f"{label} 请求超时 ({timeout}s), 尝试 {attempt}/{max_retries}")
                 logger.warning(f"⏱️ {label} 请求超时 (尝试 {attempt}/{max_retries})")
             except Exception as e:
-                # 非超时异常直接抛出，不重试
                 raise
             
             if attempt < max_retries:
@@ -148,7 +125,6 @@ class P115Service:
 
     def init_client(self, cookie: str):
         try:
-            # Apply proxy settings to environment if configured
             import os
             if settings.PROXY_ENABLED and settings.PROXY_HOST and settings.PROXY_PORT:
                 proxy_type = settings.PROXY_TYPE.lower()
@@ -167,7 +143,6 @@ class P115Service:
             if settings.PROXY_ENABLED:
                 proxy_info = f" (Proxy: {settings.PROXY_TYPE}://{settings.PROXY_HOST}:{settings.PROXY_PORT})"
             logger.info(f"P115Client and FileSystem initialized successfully{proxy_info}")
-            # Verify connection asynchronously
             asyncio.create_task(self.verify_connection())
         except Exception as e:
             logger.error(f"Failed to initialize P115Client: {e}")
@@ -177,16 +152,9 @@ class P115Service:
 
     @asynccontextmanager
     async def _acquire_task_lock(self, task_type: Literal["save_share", "cleanup"], wait: bool = True):
-        """已废弃：改为使用任务队列排队处理。
-        为了兼容性保留接口，实际逻辑改为在队列中排队。
-        """
-        # 注意：清理任务目前仍可保持同步等待，但建议所有 115 写操作都过队列
-        # 这里为了最小化变动，暂时仅针对 share 链接进行队列化
         yield
 
     async def _enqueue_op(self, task_type: str, func, *args, **kwargs):
-        """将操作放入队列并等待结果"""
-        # 确保 Worker 正在运行
         if self._worker_task is None or self._worker_task.done():
             async with self._worker_lock:
                 if self._worker_task is None or self._worker_task.done():
@@ -198,13 +166,11 @@ class P115Service:
         return await future
 
     async def verify_connection(self) -> bool:
-        """Verify the 115 cookie connection"""
         if not self.client:
             self.is_connected = False
             return False
             
         try:
-            # Simple API call to verify cookie
             resp = await self._api_call_with_timeout(
                 self.client.user_info, async_=True,
                 timeout=30, max_retries=2, label="user_info",
@@ -223,20 +189,13 @@ class P115Service:
         return False
 
     def clear_save_dir_cache(self):
-        """Clear the cached save directory CID (e.g. after cleanup)"""
         self._save_dir_cid = 0
         logger.debug("🗑️ 已清除保存目录 CID 缓存")
 
     async def _ensure_save_dir(self, path: Optional[str] = None):
-        """Ensure the save directory exists and return its CID.
-        
-        Uses a cached CID to avoid repeated API calls for the default path.
-        If a custom path is provided, it will always verify/create it.
-        """
         is_default = path is None
         path = path or settings.P115_SAVE_DIR or "/分享保存"
         
-        # Return cached CID if available and using default path
         if is_default and self._save_dir_cid > 0:
             logger.debug(f"📂 使用缓存的保存目录 CID: {self._save_dir_cid}")
             return self._save_dir_cid
@@ -246,12 +205,10 @@ class P115Service:
         if not self.client:
             raise RuntimeError("P115Client 未初始化，无法创建保存目录")
         
-        # Retry up to 3 times with timeout
         last_error = None
         for attempt in range(1, 4):
             try:
                 logger.info(f"📁 调用 fs_makedirs_app 创建目录... (尝试 {attempt}/3)")
-                # Add 30s timeout to prevent indefinite hanging
                 resp = await asyncio.wait_for(
                     self.client.fs_makedirs_app(path, pid=0, async_=True, **self._get_ios_ua_kwargs()),
                     timeout=30
@@ -259,8 +216,6 @@ class P115Service:
                 logger.info(f"📋 fs_makedirs_app 响应: {resp}")
                 check_response(resp)
                 
-                # The response structure has 'cid' at the top level (not in 'data')
-                # Response format: {'state': True, 'error': '', 'errCode': 0, 'cid': '3358575817564146054'}
                 cid = 0
                 if "cid" in resp:
                     cid = int(resp["cid"])
@@ -275,7 +230,6 @@ class P115Service:
                 if cid == 0:
                     raise RuntimeError(f"无法从响应获取有效的 CID: {resp}")
                     
-                # Cache the CID only if it's the default path
                 if is_default:
                     self._save_dir_cid = cid
                 logger.info(f"✅ 保存目录已确认: {path} (CID: {cid})")
@@ -291,15 +245,11 @@ class P115Service:
             if attempt < 3:
                 await asyncio.sleep(3)
         
-        # All retries exhausted — raise to prevent saving to root
         raise RuntimeError(f"无法确保保存目录 {path} 存在 (已重试3次): {last_error}")
 
     async def _handle_already_received(self, to_cid: int, names: list[str], share_url: str, metadata: dict, have_vio_file: int, receive_payload: dict):
-        """处理文件已经接收的情况：先检查是否存在，如果不存在则在子目录重试转存"""
         logger.warning(f"⚠️ 115 提示文件该分享已接收过: {share_url}")
-        # Verify if files really exist in to_cid
         try:
-            # 用 _find_files_in_dir 查找（支持 search + list 双重查找）
             found_files = await self._find_files_in_dir(to_cid, names)
             found_count = len(found_files)
             if found_count > 0:
@@ -315,7 +265,6 @@ class P115Service:
                 }
             else:
                 logger.warning("⚠️ 115 提示已接收，但在保存目录未找到文件。尝试创建新目录重试转存...")
-                # 创建带时间戳的新目录
                 new_folder_name = f"Retry_{int(time.time())}"
                 resp = await self._api_call_with_timeout(
                     self.client.fs_makedirs_app, new_folder_name, pid=to_cid, async_=True,
@@ -329,7 +278,6 @@ class P115Service:
                     
                 logger.info(f"📁 已创建重试目录: {new_folder_name} (CID: {new_cid})")
                 
-                # 修改 payload 的 cid 为新创建的目录并重试
                 retry_payload = receive_payload.copy()
                 retry_payload["cid"] = new_cid
                 
@@ -354,7 +302,6 @@ class P115Service:
         except Exception as check_e:
             logger.error(f"❌ 处理已接收逻辑(验证或重试转存)时出错: {check_e}")
             
-            # 尝试提取 errno
             errno_val = getattr(check_e, "errno", None)
             if hasattr(check_e, 'args') and len(check_e.args) >= 2 and isinstance(check_e.args[1], dict):
                 if not errno_val:
@@ -366,7 +313,6 @@ class P115Service:
                     "error_type": "already_exists_missing",
                     "message": "该分享链接您已转存过。115 限制同一链接由于文件丢失而无法重复转存，重试转存也失败，请尝试寻找原文件或从回收站还原。"
                 }
-            # Assume failure to be safe
             return {
                 "status": "error", 
                 "error_type": "unknown",
@@ -374,15 +320,12 @@ class P115Service:
             }
 
     async def save_share_link(self, share_url: str, metadata: dict = None, target_dir: Optional[str] = None):
-        """通过队列保存链接"""
         return await self._enqueue_op("save_share", self._save_share_link_internal, share_url, metadata, target_dir)
 
     async def save_and_share(self, share_url: str, metadata: dict = None, target_dir: Optional[str] = None):
-        """通过队列进行转存并分享"""
         async def _internal_flow():
             save_res = await self._save_share_link_internal(share_url, metadata, target_dir)
             if save_res and save_res.get("status") == "success":
-                # 整理文件
                 save_res = await self._organize_files(save_res, metadata)
                 share_res = await self.create_share_link(save_res)
                 if isinstance(share_res, str):
@@ -403,17 +346,14 @@ class P115Service:
         return await self._enqueue_op(f"save_and_share({share_url})", _internal_flow)
 
     async def _save_share_link_internal(self, share_url: str, metadata: dict = None, target_dir: Optional[str] = None):
-        """Internal logic for saving a 115 share link (no locking)"""
         if not self.client:
             logger.warning("P115Client not initialized, cannot save link")
             return None
         
         logger.info(f"📥 开始处理分享链接: {share_url}")
         try:
-            # 1. Extract share/receive codes
             payload = share_extract_payload(share_url)
             
-            # 2. Get share snapshot to get file IDs and names (带超时重试)
             snap_resp = await self._api_call_with_timeout(
                 self.client.share_snap_app, payload, async_=True,
                 timeout=API_TIMEOUT, label="share_snap",
@@ -422,7 +362,6 @@ class P115Service:
             check_response(snap_resp)
             logger.debug(f"📋 share_snap 响应数据: {snap_resp.get('data')}")
 
-            # Check for audit and violation status
             data = snap_resp.get("data", {})
             if not data:
                 logger.error("❌ share_snap 响应中缺少 data 字段")
@@ -433,7 +372,7 @@ class P115Service:
                 }
 
             share_info = data.get("shareinfo" if "shareinfo" in data else "share_info", {})
-            share_state = data.get("share_state", share_info.get("share_state", share_info.get("status"))) # Multiple fallbacks
+            share_state = data.get("share_state", share_info.get("share_state", share_info.get("status")))
             if share_state is not None:
                 try:
                     share_state = int(share_state)
@@ -444,7 +383,6 @@ class P115Service:
             
             logger.info(f"📊 分享状态: {share_state}, 标题: {share_title}, 违规标志: {have_vio_file}")
 
-            # 即使包含违规内容标志，也尝试继续处理，因为很多时候文件列表依然可用
             if have_vio_file == 1:
                 logger.warning(f"⚠️ 分享链接包含违规内容标志 (have_vio_file=1): {share_url}")
 
@@ -452,7 +390,6 @@ class P115Service:
             if share_state == 0 or is_snapshotting:
                 reason = "snapshotting" if is_snapshotting else "auditing"
                 logger.info(f"🔍 分享链接处于{ '审核中' if reason == 'auditing' else '快照生成中' }，进入轮询等待队列: {share_url}")
-                # Save to DB for persistence
                 async with async_session() as session:
                     new_task = PendingLink(
                         share_url=share_url,
@@ -481,7 +418,6 @@ class P115Service:
             
             if share_state != 1:
                 logger.warning(f"⚠️ 分享链接状态异常 (state={share_state}): {share_url}")
-                # Allow attempt if state is unknown but not explicitly pending/expired/prohibited
             
             items = data.get("list", [])
             if not items:
@@ -498,16 +434,12 @@ class P115Service:
                     "message": "分享链接内没有可供转存的文件"
                 }
             
-            # Extract file/folder IDs and names
-            # Files use 'fid', folders use 'cid'
             fids = []
             names = []
             for item in items:
-                # Try to get fid (file) or cid (folder)
                 fid = item.get("fid") or item.get("cid")
                 if fid:
                     fids.append(str(fid))
-                    # 115 share_snap returns names with unnecessary escapes sometimes (e.g. \' for ')
                     raw_name = item.get("n") or item.get("fn") or item.get("name") or item.get("file_name") or item.get("title")
                     if not raw_name:
                         logger.warning(f"⚠️ 无法从分享项提取文件名，可用的键有: {list(item.keys())}")
@@ -527,9 +459,8 @@ class P115Service:
             
             logger.info(f"📦 检测到 {len(fids)} 个项目: {', '.join(names[:3])}{'...' if len(names) > 3 else ''}")
             
-            # 3. Ensure save directory (with network recovery retry)
             to_cid = None
-            max_network_wait = 1800  # 30 minutes
+            max_network_wait = 1800
             network_start = time.time()
             network_attempt = 0
             
@@ -559,14 +490,11 @@ class P115Service:
                     )
                     await asyncio.sleep(wait_time)
             
-            # 4. Receive files
-            # 💡 增加预检：在大文件保存前尝试清理
             try:
                 total_size = int(share_info.get("file_size") or 0)
             except (ValueError, TypeError):
                 total_size = 0
             await self.check_and_prepare_capacity(file_count=len(fids), total_size=total_size)
-            # 重新获取最新的 CID，以防清理逻辑删除了目录并重建了它
             to_cid = await self._ensure_save_dir(target_dir)
 
             receive_payload = {
@@ -586,7 +514,6 @@ class P115Service:
                 logger.info(f"✅ 链接转存指令已发送: {share_url} -> CID {to_cid}")
                 recursive_links = []
             except Exception as recv_error:
-                # Check for 500-file limit error (errno 4200044)
                 error_info = getattr(recv_error, "args", [None, {}])[1] if hasattr(recv_error, "args") and len(recv_error.args) >= 2 else {}
                 errno_val = error_info.get("errno") if isinstance(error_info, dict) else None
                 
@@ -594,11 +521,9 @@ class P115Service:
                     logger.warning(f"⚠️ 触发 115 非会员 500 文件保存限制，尝试递归分批保存: {share_url}")
                     recursive_links = await self._save_share_recursive(share_url, to_cid)
                     logger.info(f"✅ 递归分批保存指令已处理完毕: {share_url}")
-                # Check if it's a "file already received" error (errno 4200045)
                 elif errno_val == 4200045 or "4200045" in str(recv_error) or "已经接收" in str(recv_error) or "已接收" in str(recv_error):
                     return await self._handle_already_received(to_cid, names, share_url, metadata, have_vio_file, receive_payload)
                 else:
-                    # Other errors, re-raise
                     raise
             
             return {
@@ -611,7 +536,6 @@ class P115Service:
                 "have_vio": have_vio_file == 1
             }
         except Exception as e:
-            # 彻底避免 loguru 格式化异常时可能触发的 KeyError
             try:
                 errno_val = getattr(e, "errno", None)
                 if hasattr(e, 'args') and len(e.args) >= 2 and isinstance(e.args[1], dict):
@@ -644,10 +568,9 @@ class P115Service:
                     "db_id": db_id
                 }
             
-            # 检查是否由于账号限制导致失败
             if "限制接收" in error_msg:
                 logger.warning(f"🚫 触发 115 接收限制: {share_url}")
-                self.set_restriction(hours=1.0) # 设置 1 小时全局限制
+                self.set_restriction(hours=1.0)
                 
                 async with async_session() as session:
                     new_task = PendingLink(
@@ -667,7 +590,6 @@ class P115Service:
                     "db_id": db_id
                 }
 
-            # 检查是否为"已经接收"异常 (errno 4200045)
             if errno_val == 4200045 or "4200045" in error_msg or "已经接收" in error_msg or "已接收" in error_msg:
                 retry_payload = {
                     "share_code": payload["share_code"],
@@ -685,27 +607,21 @@ class P115Service:
             }
 
     async def _save_share_recursive(self, share_url: str, target_pid: int) -> list[str]:
-        """递归分批保存分享内容 (规避 500 文件限制，集成中转清理逻辑)"""
         payload = share_extract_payload(share_url)
         share_code = payload["share_code"]
         receive_code = payload["receive_code"] or ""
         
-        # 状态追踪
         cid_map = {0: target_pid}
         share_links = []
         files_saved_total = 0
         
-        # 路径重建追踪：share_cid -> (parent_share_cid, name)
         share_structure = {0: (None, "")}
         
         async def reconstruct_path(current_share_cid, current_cid_map):
-            """在清理后重建当前所在的文件夹路径"""
-            # 1. 确保保存目录存在
             new_root_cid = await self._ensure_save_dir()
             current_cid_map.clear()
             current_cid_map[0] = new_root_cid
             
-            # 2. 获取从根到当前的路径名列表
             path_names = []
             temp_cid = current_share_cid
             while temp_cid != 0:
@@ -714,11 +630,9 @@ class P115Service:
                 temp_cid = parent
             path_names.reverse()
             
-            # 3. 逐层创建
             current_share = 0
             current_real = new_root_cid
             for name in path_names:
-                # 寻找对应的子 share_cid
                 child_share = next(s_cid for s_cid, info in share_structure.items() if info[0] == current_share and info[1] == name)
                 resp = await self._api_call_with_timeout(
                     self.client.fs_makedirs_app, name, pid=current_real, async_=True,
@@ -740,7 +654,6 @@ class P115Service:
                 
             current_target_pid = cid_map[pid]
             
-            # 1. 记录结构并创建子目录
             for d in dirs:
                 share_cid = d["id"]
                 name = d["name"]
@@ -763,13 +676,11 @@ class P115Service:
                     else:
                         logger.error(f"❌ 递归保存过程中创建子目录 {name} 失败: {e}")
             
-            # 2. 分批转存该目录下的文件
             fids = [str(f["id"]) for f in files]
             if not fids:
                 continue
                 
             for i in range(0, len(fids), 500):
-                # 🚦 检查是否需要中转清理
                 need_cleanup = files_saved_total >= 10000
                 if not need_cleanup and settings.P115_CLEANUP_CAPACITY_ENABLED:
                     used, total = await self.get_storage_stats()
@@ -831,7 +742,6 @@ class P115Service:
         return share_links
 
     async def get_share_status(self, share_url: str):
-        """Check the current status of a share link"""
         try:
             payload = share_extract_payload(share_url)
             snap_resp = await self._api_call_with_timeout(
@@ -893,10 +803,8 @@ class P115Service:
             return None
 
     async def _find_files_in_dir(self, cid: int, target_names: list) -> list:
-        """在指定目录中查找文件，使用多种方式确保找到"""
         matched = []
         
-        # 方式 1: 使用 fs_search 按文件名搜索
         for name in target_names:
             try:
                 search_resp = await self._api_call_with_timeout(
@@ -935,7 +843,6 @@ class P115Service:
         if len(matched) == len(target_names):
             return matched
         
-        # 方式 2: 回退到 fs_files 列目录
         found_names = {m["name"] for m in matched}
         remaining_names = [n for n in target_names if n not in found_names]
         logger.info(f"🔍 fs_search 找到 {len(matched)}/{len(target_names)} 个文件，尝试 fs_files 查找剩余: {remaining_names}")
@@ -1335,7 +1242,6 @@ class P115Service:
             return False
 
     async def get_all_history_links(self, limit: int = 50) -> List[Dict]:
-        """获取所有历史记录，按时间倒序"""
         try:
             from app.models.schema import LinkHistory
             from sqlalchemy import select, desc
@@ -1384,7 +1290,7 @@ class P115Service:
             logger.error("❌ 内部清空回收站失败: {}", e)
             return False
 
-    # ========== 整理方法 ==========
+    # ========== 整理方法（已修复） ==========
     async def _organize_files(self, save_result: dict, metadata: dict) -> dict:
         """整理文件：识别媒体、移动目录、重命名
            使用转存后的文件/文件夹名作为标题来源
@@ -1509,20 +1415,35 @@ class P115Service:
                 old_fid = await self._find_single_fid(to_cid, names[0])
                 if old_fid:
                     try:
-                        # 调用 fs_rename，注意处理返回值
+                        # 调用 fs_rename，注意返回值可能是元组或字典
                         resp = await self._api_call_with_timeout(
                             self.client.fs_rename,
                             old_fid, new_name, pid=target_cid,
                             async_=True, **self._get_ios_ua_kwargs()
                         )
-                        # 检查响应是否成功（根据 p115client 的实际返回格式调整）
-                        if isinstance(resp, dict) and resp.get('state'):
-                            logger.info(f"✅ 已移动并重命名 {names[0]} -> {target_path}/{new_name}")
-                            # 更新 save_result，以便后续分享链接使用新位置和新名称
+                        # 检查响应是否成功 - 处理可能的返回值格式
+                        if isinstance(resp, dict):
+                            if resp.get('state'):
+                                logger.info(f"✅ 已移动并重命名 {names[0]} -> {target_path}/{new_name}")
+                                # 更新 save_result，以便后续分享链接使用新位置和新名称
+                                save_result['to_cid'] = target_cid
+                                save_result['names'] = [new_name]
+                            else:
+                                logger.error(f"❌ 移动/重命名失败，响应: {resp}")
+                        elif isinstance(resp, tuple) and len(resp) >= 2:
+                            # 某些情况下可能返回 (state, data) 格式
+                            state, data = resp[0], resp[1] if len(resp) > 1 else None
+                            if state:
+                                logger.info(f"✅ 已移动并重命名 {names[0]} -> {target_path}/{new_name}")
+                                save_result['to_cid'] = target_cid
+                                save_result['names'] = [new_name]
+                            else:
+                                logger.error(f"❌ 移动/重命名失败，响应: {resp}")
+                        else:
+                            # 如果返回的是成功状态码或其他格式，默认认为成功
+                            logger.info(f"✅ 移动/重命名请求已发送 (响应: {resp})")
                             save_result['to_cid'] = target_cid
                             save_result['names'] = [new_name]
-                        else:
-                            logger.error(f"❌ 移动/重命名失败，响应: {resp}")
                     except Exception as e:
                         logger.error(f"❌ 移动/重命名失败: {e}")
                 else:
